@@ -73,6 +73,8 @@ export async function requireHuman(
   const principal = await authenticateHuman(
     request.server.db,
     request.server.identity,
+    request.server.redis,
+    request.server.now(),
     request.headers.authorization,
   )
   if (principal === null) {
@@ -121,6 +123,8 @@ export async function requireDeviceOrHuman(
   const human = await authenticateHuman(
     request.server.db,
     request.server.identity,
+    request.server.redis,
+    request.server.now(),
     request.headers.authorization,
   )
   if (human !== null) {

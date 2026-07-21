@@ -73,3 +73,34 @@ export { runSessions } from './commands/sessions.js'
 export type { SessionsOptions } from './commands/sessions.js'
 export { runDock } from './commands/dock.js'
 export type { DockDaemonState, DockOptions, DockResult } from './commands/dock.js'
+
+// P2c — the online surface: the docked-state config, the typed control-plane
+// client, the TCP cell dialer, the terminal QR renderer, and the daemon's
+// reconnecting relay uplink. These are the pieces `dock`, the host dial-out, and
+// the remote controller are built from — exported so the end-to-end proof (and any
+// future controller) can drive the real code paths rather than reimplement them.
+export {
+  type DockConfig,
+  dockConfigPath,
+  readDockConfig,
+  writeDockConfig,
+} from './dock-config.js'
+export { ControlPlaneClient, ControlPlaneError, resolveApiUrl } from './control-plane-client.js'
+export type {
+  CliAuthStartResult,
+  CliAuthExchangeResult,
+  ControlPlaneClientOptions,
+  CreateHostResult,
+  HeartbeatResult,
+  MintPairResult,
+  RelayTicketResult,
+  SessionReport,
+} from './control-plane-client.js'
+export { type CellAddress, connectCell, parseCellUrl } from './cell-url.js'
+export { renderQrTerminal } from './qr.js'
+export { startRelayUplink } from './daemon/relay-uplink.js'
+export type {
+  RelayUplinkHandle,
+  RelayUplinkOptions,
+  RelayUplinkState,
+} from './daemon/relay-uplink.js'

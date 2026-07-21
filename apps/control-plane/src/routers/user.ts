@@ -40,6 +40,8 @@ const CreateHostResponse = z.object({
     createdAt: z.string(),
   }),
   hostKey: z.string(),
+  /** The relay director URL the docking host stores for its dial-out, or `null`. */
+  directorUrl: z.string().nullable(),
 })
 
 /** A host as it appears in `GET /v1/hosts`. */
@@ -114,6 +116,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         createdAt: created.createdAt.toISOString(),
       },
       hostKey: secret.token,
+      directorUrl: app.appConfig.directorUrl ?? null,
     })
   })
 

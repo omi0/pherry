@@ -15,7 +15,7 @@
  * inject a {@link FakeBackend}. Everything else — clock, base dir, reservation TTL
  * — is injectable, so the whole daemon runs against fakes with no real process.
  */
-import { SecureChannel } from '@pherry/channel'
+import { type Duplex, SecureChannel } from '@pherry/channel'
 import {
   type Backend,
   CustodyDesk,
@@ -33,13 +33,43 @@ import {
   decodeExitPayload,
   decodePtyFrame,
 } from '@pherry/protocol'
+import { relayChannelContext } from '@pherry/relay-core'
 import { type ListeningServer, listenUnix } from '@pherry/transport-node'
+import { connectCell } from '../cell-url.js'
+import { ControlPlaneClient, type SessionReport } from '../control-plane-client.js'
 import { isProcessAlive, readPidFile, removePidFile, writePidFile } from '../daemon/pidfile.js'
+import {
+  type RelayUplinkHandle,
+  type RelayUplinkState,
+  startRelayUplink,
+} from '../daemon/relay-uplink.js'
+import { readDockConfig } from '../dock-config.js'
 import { loadOrCreateHostKey } from '../host-key.js'
 import { hostPidPath, hostSocketPath } from '../paths.js'
 
 /** How long, in ms, an unclaimed custody reservation stays claimable by default. */
 const DEFAULT_RESERVE_TTL_MS = 30_000
+
+/** Cap on buffered `ended` session reports awaiting a successful heartbeat drain. */
+const MAX_ENDED_REPORTS = 256
+
+/**
+ * Test seam for the relay uplink (§1 of leg-P2c). Every field is optional and only
+ * consulted when the daemon is docked; production leaves it unset and the uplink
+ * dials the real cell over TCP and beats the real control-plane API.
+ */
+export interface ServeUplinkOptions {
+  /** Override the cell dial (tests wire an in-process cell). Defaults to `connectCell(directorUrl)`. */
+  connect?: () => Duplex | Promise<Duplex>
+  /** Override the `fetch` the heartbeat client uses (tests record posts). */
+  fetchImpl?: typeof fetch
+  /** Override the heartbeat interval, in ms. */
+  heartbeatIntervalMs?: number
+  /** Override the reconnect backoff shape. */
+  backoff?: { initialMs?: number; maxMs?: number; factor?: number }
+  /** Observe the uplink's lifecycle transitions. */
+  onStateChange?: (state: RelayUplinkState, error?: Error) => void
+}
 
 /** Options for {@link startServe}. */
 export interface ServeOptions {
@@ -51,6 +81,8 @@ export interface ServeOptions {
   reserveTtlMs?: number
   /** Clock, injectable for tests. Defaults to `Date.now`. */
   now?: () => number
+  /** Test seam for the relay uplink; ignored entirely when the daemon is not docked. */
+  uplink?: ServeUplinkOptions
 }
 
 /** A running custody daemon. */
@@ -59,6 +91,8 @@ export interface ServeHandle {
   readonly socketPath: string
   /** The singleton-lock pid file this daemon owns. */
   readonly pidPath: string
+  /** The hostId the outbound relay uplink registered under, or `null` when undocked. */
+  readonly relayHostId: string | null
   /** Stop listening, dispose every live session, and drop the lock. Idempotent. */
   close(): Promise<void>
 }
@@ -90,11 +124,18 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
   const staticKey = await loadOrCreateHostKey(baseDir)
   await writePidFile(process.pid, baseDir)
 
+  const now = options.now ?? Date.now
   const registry = new SessionRegistry()
-  const desk = new CustodyDesk({ registry, ...(options.now ? { now: options.now } : {}) })
+  const desk = new CustodyDesk({ registry, now })
   const backend = options.backend ?? new LocalPtyBackend()
-  // Bookkeeping the registry does not carry: the launch's argv/cwd, for listing.
-  const launches = new Map<SessionRef, { argv: string[]; cwd: string }>()
+  // Bookkeeping the registry does not carry: the launch's argv/cwd (for listing)
+  // and when it started (for the heartbeat's session report).
+  const launches = new Map<SessionRef, { argv: string[]; cwd: string; startedAt: number }>()
+  // Sessions that ended since the last successful heartbeat drained the buffer.
+  // Only collected once an uplink is running (a docked daemon); bounded so a
+  // wedged relay/control-plane cannot grow it without limit.
+  const endedReports: SessionReport[] = []
+  let collectEnded = false
   // A fresh stream id per claimed session — the Controller keys inbound PTY
   // frames by it, so every concurrent session must own a distinct one.
   let nextStreamId = 1
@@ -103,13 +144,24 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     reserve(spec) {
       desk.sweepExpired()
       const reservation = desk.reserveOpenSession(spec as SessionSpec, reserveTtlMs)
-      launches.set(reservation.ref, { argv: spec.argv, cwd: spec.cwd })
+      launches.set(reservation.ref, { argv: spec.argv, cwd: spec.cwd, startedAt: now() })
       return { sessionRef: reservation.ref, expiresAt: reservation.expiresAt }
     },
     async claim(sessionRef) {
       const session = await desk.claimOpenSession(sessionRef, backend, { streamId: nextStreamId++ })
-      // When the process ends, drop the session so it stops being listed/mirrored.
+      // When the process ends, drop the session so it stops being listed/mirrored,
+      // and remember it for the next heartbeat's `ended` report.
       void watchSessionEnd(session).then(() => {
+        const launch = launches.get(sessionRef)
+        if (collectEnded && launch) {
+          endedReports.push({
+            sessionRef,
+            status: 'ended',
+            startedAt: launch.startedAt,
+            endedAt: now(),
+          })
+          if (endedReports.length > MAX_ENDED_REPORTS) endedReports.shift()
+        }
         registry.remove(sessionRef)
         launches.delete(sessionRef)
         void session.dispose()
@@ -155,10 +207,82 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     throw error
   }
 
+  // The second front door: when this machine is docked to a control plane (and the
+  // plane assigned a director), dial the relay outbound and serve the SAME registry
+  // over it. A failing or absent uplink must never disturb the local socket path —
+  // so a missing/malformed dock config just leaves the daemon local-only.
+  let uplink: RelayUplinkHandle | undefined
+  let relayHostId: string | null = null
+  try {
+    const dock = await readDockConfig(baseDir)
+    if (dock !== null && dock.directorUrl !== null) {
+      collectEnded = true
+      relayHostId = dock.hostId
+      const directorUrl = dock.directorUrl
+
+      // One heartbeat POST: every live session, plus the `ended` reports buffered
+      // since the last success (drained only once the beat resolves, so a failed
+      // beat keeps them for the next).
+      const sendHeartbeat = async (): Promise<void> => {
+        const client = new ControlPlaneClient({
+          apiUrl: dock.apiUrl,
+          ...(options.uplink?.fetchImpl ? { fetchImpl: options.uplink.fetchImpl } : {}),
+        })
+        const live: SessionReport[] = registry.list().map(
+          (session): SessionReport => ({
+            sessionRef: session.ref,
+            status: 'live',
+            startedAt: launches.get(session.ref)?.startedAt ?? now(),
+          }),
+        )
+        const ended = endedReports.slice()
+        await client.heartbeat(dock.hostCredential, { sessions: [...live, ...ended] })
+        endedReports.splice(0, ended.length)
+      }
+
+      uplink = startRelayUplink({
+        hostId: dock.hostId,
+        hostStaticKey: staticKey,
+        connect: options.uplink?.connect ?? (() => connectCell(directorUrl)),
+        onConnection: (duplex, ticket) => {
+          const channel = new SecureChannel({
+            role: 'responder',
+            duplex,
+            staticKey,
+            context: relayChannelContext(dock.hostId, ticket),
+          })
+          channels.add(channel)
+          const served = serveConnection(channel, registry, { custody, listSessions })
+          // Same onClose bookkeeping as a local connection.
+          channel.onClose(() => {
+            served.close()
+            channels.delete(channel)
+          })
+        },
+        sendHeartbeat,
+        ...(options.uplink?.heartbeatIntervalMs !== undefined
+          ? { heartbeatIntervalMs: options.uplink.heartbeatIntervalMs }
+          : {}),
+        ...(options.uplink?.backoff ? { backoff: options.uplink.backoff } : {}),
+        ...(options.uplink?.onStateChange ? { onStateChange: options.uplink.onStateChange } : {}),
+      })
+    }
+  } catch {
+    // A malformed dock config (or any uplink-start failure) must not take the local
+    // socket down; the credential is never echoed, so nothing is logged here.
+    uplink?.close()
+    uplink = undefined
+    relayHostId = null
+  }
+
   let closed = false
   const close = async (): Promise<void> => {
     if (closed) return
     closed = true
+    // Stop the uplink first: its timers and control connection go quiet before we
+    // tear down the shared registry and channels (the relay-bridged channels live
+    // in the same set and are closed below like any other).
+    uplink?.close()
     // Close live connections first so the server's close callback is not left
     // waiting on them; each close fires onClose, which removes it from the set.
     for (const channel of [...channels]) channel.close()
@@ -168,7 +292,7 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     await removePidFile(baseDir)
   }
 
-  return { socketPath, pidPath: hostPidPath(baseDir), close }
+  return { socketPath, pidPath: hostPidPath(baseDir), relayHostId, close }
 }
 
 /**

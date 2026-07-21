@@ -27,6 +27,8 @@ describe('POST /v1/hosts', () => {
     expect(body.host.id).toMatch(/^host_[0-9a-f]{32}$/)
     expect(body.host.keyPrefix).toMatch(/^[0-9a-f]{8}$/)
     expect(body.hostKey).toMatch(/^hk_[0-9a-f]{40}$/)
+    // No DIRECTOR_URL configured in this world → the host's dial-out target is null.
+    expect(body.directorUrl).toBeNull()
 
     // The stored row carries only the hash + prefix, never the plaintext.
     const rows = await world.db.select().from(hosts).where(eq(hosts.id, body.host.id))
@@ -41,6 +43,18 @@ describe('POST /v1/hosts', () => {
       headers: { authorization: `Bearer ${body.hostKey}` },
     })
     expect(hb.statusCode).toBe(200)
+  })
+
+  it('echoes the configured directorUrl for the host dial-out', async () => {
+    const world = await seedWorld({ DIRECTOR_URL: 'https://relay.example' })
+    const res = await world.app.inject({
+      method: 'POST',
+      url: '/v1/hosts',
+      headers: { authorization: `Bearer ${world.humanToken}` },
+      payload: { name: 'workstation', staticPublicKeyB64: freshKeyB64() },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().directorUrl).toBe('https://relay.example')
   })
 
   it('rejects a bad-length key with 400', async () => {

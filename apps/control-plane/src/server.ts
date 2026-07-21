@@ -15,6 +15,7 @@ import type { Config } from './config.js'
 import type { Db } from './db/client.js'
 import type { IdentityProvider } from './identity.js'
 import type { RedisLike } from './redis.js'
+import { cliAuthRoutes } from './routers/cli-auth.js'
 import { hostRoutes } from './routers/host.js'
 import { internalRoutes } from './routers/internal.js'
 import { pairingRoutes } from './routers/pairing.js'
@@ -75,6 +76,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   // raw-body parser, encapsulated so the others still receive parsed JSON.
   app.register(userRoutes)
   app.register(pairingRoutes)
+  app.register(cliAuthRoutes)
   app.register(hostRoutes)
   app.register(relayRoutes)
   app.register(internalRoutes)

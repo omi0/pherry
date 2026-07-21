@@ -4,6 +4,14 @@
   "description": "The Pherry CLI — pherry.",
   "license": "MIT",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "bin": {
     "pherry": "./dist/bin/pherry.js"
   },
@@ -18,8 +26,10 @@
     "@pherry/channel": "workspace:*",
     "@pherry/host": "workspace:*",
     "@pherry/protocol": "workspace:*",
+    "@pherry/relay-core": "workspace:*",
     "@pherry/sdk": "workspace:*",
-    "@pherry/transport-node": "workspace:*"
+    "@pherry/transport-node": "workspace:*",
+    "uqr": "^0.1.3"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

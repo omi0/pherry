@@ -14,8 +14,10 @@ reusable **local-terminal client engine** that the end-user surface builds on.
 ## The custody flow (leg 3c)
 
 ```bash
-# One-time: ensure the host identity + local config, and start the daemon.
-pherry dock
+# One-time onboarding: sign in (one browser visit), register this host with the
+# control plane, start the daemon dialing the relay, and print a QR to pair your
+# phone. Needs the P2 cloud — point it at a control plane with --api (or PHERRY_API_URL).
+pherry dock --api <control-plane-url>
 
 # In a repo: install PATH shims so its agents launch under host custody.
 pherry board
@@ -98,7 +100,10 @@ real TTY. The real `process.stdin/stdout` + `SIGWINCH` adapter is
 `processTerminalIo()`.
 
 Also exported: the host-key helpers (`loadOrCreateHostKey`, `readHostPublicKey`)
-and the run/attach socket-path helpers.
+and the run/attach socket-path helpers, plus the P2c online surface — the docked-
+state config (`readDockConfig`/`writeDockConfig`), the typed `ControlPlaneClient`,
+the TCP cell dialer (`parseCellUrl`/`connectCell`), the `renderQrTerminal` pairing
+QR, and the daemon's reconnecting `startRelayUplink`.
 
 ## Develop
 

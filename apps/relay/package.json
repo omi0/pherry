@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.2.14",
+    "@pherry/cli": "workspace:*",
     "@pherry/control-plane": "workspace:*",
     "@pherry/host": "workspace:*",
     "@pherry/protocol": "workspace:*",

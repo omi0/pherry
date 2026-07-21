@@ -6,8 +6,11 @@ describe('loadConfig', () => {
     const config = loadConfig({})
     expect(config.pairTokenTtlMs).toBe(600_000)
     expect(config.relayTicketTtlMs).toBe(60_000)
+    expect(config.cliAuthRequestTtlMs).toBe(600_000)
+    expect(config.cliTokenTtlMs).toBe(3_600_000)
     expect(config.rateLimits.pairRedeemPerMin).toBe(10)
     expect(config.rateLimits.ticketsPerMin).toBe(30)
+    expect(config.rateLimits.cliAuthPerMin).toBe(10)
   })
 
   it('leaves every credential undefined when blank (degrade, do not throw)', () => {
@@ -40,6 +43,9 @@ describe('loadConfig', () => {
       INTERNAL_API_KEY: 'internal_key',
       PAIR_TOKEN_TTL_MS: '900000',
       RATE_LIMIT_TICKETS_PER_MIN: '99',
+      CLI_AUTH_REQUEST_TTL_MS: '120000',
+      CLI_TOKEN_TTL_MS: '7200000',
+      RATE_LIMIT_CLI_AUTH_PER_MIN: '5',
     })
     expect(config.databaseUrl).toBe('postgres://localhost/pherry')
     expect(config.redisUrl).toBe('redis://localhost:6379')
@@ -50,6 +56,9 @@ describe('loadConfig', () => {
     expect(config.internalApiKey).toBe('internal_key')
     expect(config.pairTokenTtlMs).toBe(900_000)
     expect(config.rateLimits.ticketsPerMin).toBe(99)
+    expect(config.cliAuthRequestTtlMs).toBe(120_000)
+    expect(config.cliTokenTtlMs).toBe(7_200_000)
+    expect(config.rateLimits.cliAuthPerMin).toBe(5)
   })
 
   it('derives the JWKS url from the issuer when not given', () => {

@@ -22,12 +22,14 @@ import { runOpen } from '../commands/open.js'
 import { startRun } from '../commands/run.js'
 import { startServe, stopServe } from '../commands/serve.js'
 import { runSessions } from '../commands/sessions.js'
+import { ControlPlaneError } from '../control-plane-client.js'
 import { livePid } from '../daemon/pidfile.js'
 
 const USAGE = `pherry — steer your coding agents from your phone
 
 Usage:
-  pherry dock                       ensure host identity + config, start the daemon
+  pherry dock [--api <url>] [--token <tok>]
+                                    sign in, register this host, pair your phone
   pherry board [<repo>]             install PATH shims so agents launch under custody
   pherry anchor [<repo>]            soft brake: stop custodying new launches here
   pherry unboard [<repo>]           remove the shims / custody entirely
@@ -37,7 +39,8 @@ Dev / internal:
   pherry serve [--stop]             run (or stop) the persistent custody daemon
   pherry run <agent> [-- ...args]   spawn an agent and serve its mirror
   pherry attach [--socket <p>] [--session <ref>]
-                                    mirror a run socket or daemon session here
+  pherry attach --host <id> [--api <url>] [--token <tok>]
+                                    mirror a local session, or one on a remote host via the relay
   pherry open <agent> --exec-fallback <bin> -- <args...>
                                     the shim target (not run by hand)
 
@@ -54,7 +57,7 @@ async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv
   switch (command) {
     case 'dock':
-      return dockCommand()
+      return dockCommand(rest)
     case 'board':
       return boardCommand(rest)
     case 'anchor':
@@ -83,18 +86,57 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-async function dockCommand(): Promise<number> {
-  const result = await runDock({ ...baseDirOption() })
-  process.stdout.write(`pherry: host key   ${result.hostPublicKeyPath}\n`)
-  process.stdout.write(`pherry: config     ${result.configPath}\n`)
-  const daemon =
-    result.daemon === 'already-running'
-      ? 'daemon already running'
-      : result.daemon === 'started'
-        ? 'daemon started'
-        : 'daemon not started (start it with `pherry serve`)'
-  process.stdout.write(`pherry: ${daemon}\n`)
-  return 0
+async function dockCommand(args: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args,
+    allowPositionals: false,
+    options: {
+      api: { type: 'string' },
+      token: { type: 'string' },
+      name: { type: 'string' },
+      'no-daemon': { type: 'boolean' },
+    },
+  })
+  // Flags win over the environment fallbacks.
+  const apiUrl = values.api ?? process.env.PHERRY_API_URL
+  const token = values.token ?? process.env.PHERRY_TOKEN
+
+  try {
+    const result = await runDock({
+      ...baseDirOption(),
+      ...(apiUrl ? { apiUrl } : {}),
+      ...(token ? { token } : {}),
+      ...(values.name ? { name: values.name } : {}),
+      ...(values['no-daemon'] ? { autoStart: false } : {}),
+      onStep: (line) => process.stdout.write(`${line}\n`),
+    })
+
+    // The QR the phone scans, then the raw deep link as a fallback.
+    process.stdout.write(`\n${result.pair.qrText}\n\n`)
+    process.stdout.write(`pherry: pair link  ${result.pair.qrUrl}\n`)
+
+    // Closing summary: who this host is and where the daemon stands.
+    process.stdout.write(`pherry: host id    ${result.hostId}\n`)
+    const daemon =
+      result.daemon === 'already-running'
+        ? 'daemon already running'
+        : result.daemon === 'started'
+          ? 'daemon started'
+          : 'daemon not started (start it with `pherry serve`)'
+    process.stdout.write(`pherry: ${daemon}\n`)
+    if (result.daemonNeedsRestart) {
+      process.stdout.write(
+        'pherry: restart the daemon to dial the relay: `pherry serve --stop` then `pherry serve`\n',
+      )
+    }
+    return 0
+  } catch (error) {
+    if (error instanceof ControlPlaneError && error.code === 'cli-auth-invalid') {
+      process.stderr.write('pherry: sign-in expired or was denied — run `pherry dock` again\n')
+      return 1
+    }
+    throw error
+  }
 }
 
 async function boardCommand(args: string[]): Promise<number> {
@@ -212,12 +254,24 @@ async function attachCommand(args: string[]): Promise<number> {
   const { values } = parseArgs({
     args,
     allowPositionals: false,
-    options: { socket: { type: 'string' }, session: { type: 'string' } },
+    options: {
+      socket: { type: 'string' },
+      session: { type: 'string' },
+      host: { type: 'string' },
+      api: { type: 'string' },
+      token: { type: 'string' },
+    },
   })
+  // Flags win over the environment fallbacks (mirrors `dock`).
+  const apiUrl = values.api ?? process.env.PHERRY_API_URL
+  const token = values.token ?? process.env.PHERRY_TOKEN
   const { exitCode } = await runAttach({
     ...baseDirOption(),
     ...(values.socket ? { socketPath: values.socket } : {}),
     ...(values.session ? { sessionRef: values.session } : {}),
+    ...(values.host ? { host: values.host } : {}),
+    ...(apiUrl ? { apiUrl } : {}),
+    ...(token ? { token } : {}),
   })
   return exitCode ?? 0
 }

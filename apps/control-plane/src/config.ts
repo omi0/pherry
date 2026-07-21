@@ -40,6 +40,8 @@ export interface RateLimitConfig {
   readonly pairRedeemPerMin: number
   /** Max `POST /v1/relay/tickets` mints per minute per principal. */
   readonly ticketsPerMin: number
+  /** Max `POST /v1/cli/auth/{start,exchange}` attempts per minute per client IP. */
+  readonly cliAuthPerMin: number
 }
 
 /** The fully-resolved control-plane configuration. */
@@ -60,6 +62,10 @@ export interface Config {
   readonly pairTokenTtlMs: number
   /** Relay-ticket time-to-live, in milliseconds. */
   readonly relayTicketTtlMs: number
+  /** CLI-auth request time-to-live (the `dock` login handshake), in milliseconds. */
+  readonly cliAuthRequestTtlMs: number
+  /** Minted `ct_` CLI human-token time-to-live, in milliseconds. */
+  readonly cliTokenTtlMs: number
   /** Abuse-control knobs. */
   readonly rateLimits: RateLimitConfig
 }
@@ -81,8 +87,11 @@ const EnvSchema = z.object({
   INTERNAL_API_KEY: z.string().min(1).optional(),
   PAIR_TOKEN_TTL_MS: z.coerce.number().int().positive().default(600_000),
   RELAY_TICKET_TTL_MS: z.coerce.number().int().positive().default(60_000),
+  CLI_AUTH_REQUEST_TTL_MS: z.coerce.number().int().positive().default(600_000),
+  CLI_TOKEN_TTL_MS: z.coerce.number().int().positive().default(3_600_000),
   RATE_LIMIT_PAIR_REDEEM_PER_MIN: z.coerce.number().int().positive().default(10),
   RATE_LIMIT_TICKETS_PER_MIN: z.coerce.number().int().positive().default(30),
+  RATE_LIMIT_CLI_AUTH_PER_MIN: z.coerce.number().int().positive().default(10),
 })
 
 /** Strip a single trailing slash so URL joins don't double up. */
@@ -123,9 +132,12 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     internalApiKey: parsed.INTERNAL_API_KEY,
     pairTokenTtlMs: parsed.PAIR_TOKEN_TTL_MS,
     relayTicketTtlMs: parsed.RELAY_TICKET_TTL_MS,
+    cliAuthRequestTtlMs: parsed.CLI_AUTH_REQUEST_TTL_MS,
+    cliTokenTtlMs: parsed.CLI_TOKEN_TTL_MS,
     rateLimits: {
       pairRedeemPerMin: parsed.RATE_LIMIT_PAIR_REDEEM_PER_MIN,
       ticketsPerMin: parsed.RATE_LIMIT_TICKETS_PER_MIN,
+      cliAuthPerMin: parsed.RATE_LIMIT_CLI_AUTH_PER_MIN,
     },
   }
 }

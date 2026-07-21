@@ -79,9 +79,9 @@ Open packages must have **no import edge into `apps/`**. `apps/` may depend on t
 
 ## Status (as of the last commit)
 
-**Done, green, pushed** — 9 workspace projects, 463 tests: `protocol` (97) · `host` (59) · `channel`
-(71, audited) · `relay-core` (42) · `sdk` (5) · `transport-node` (6) · `cli` (45) · `control-plane`
-(130) · `relay` (8). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
+**Done, green, pushed** — 9 workspace projects, 559 tests: `protocol` (97) · `host` (59) · `channel`
+(71, audited) · `relay-core` (42) · `sdk` (5) · `transport-node` (6) · `cli` (110) · `control-plane`
+(156) · `relay` (13). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
 repo, then typing `gemini` (or `claude`/`codex`/…) is intercepted by a PATH shim → the persistent
 `pherry serve` daemon takes custody → the agent's TUI opens in your terminal while a second viewer
 (`pherry attach`) mirrors the same host-owned session.
@@ -102,4 +102,17 @@ ticket is one-time **globally**, across every cell). An in-process integration t
 API→relay flow — a paired device gets a ticket, reaches its host through the cell, and runs a live
 E2EE session — plus global one-time-use across two cells and impostor-host rejection.
 
-**Next: P2c** `dock` + host dial-out · **P3** iOS app + attention plane · **P4** cloud sandboxes.
+**Leg P2c is done — P2 is complete:** the local tool is online. `pherry dock` is the guided v1-style
+onboarding — one browser visit to sign in (a loopback-callback CLI-auth flow on the control plane, with
+a headless device-code fallback and a `--token` escape hatch; the exchange mints a short-lived `ct_`
+human token), host registration (the `hk_` credential + `host_id` + URLs stored `0600` in
+`~/.pherry/dock.json`), daemon ensure, and a terminal-rendered `pherry://pair` QR. A docked daemon
+**dials the relay outbound** (`registerHostWithCell` + reconnect/backoff + control-plane heartbeats)
+and serves the *same* `SessionRegistry` over both front doors — `serveConnection` reused verbatim,
+each bridged connection a responder channel with `context = relayChannelContext(hostId, ticket)`.
+`pherry attach --host <id>` is the remote controller: ticket from the control plane, dial the blind
+cell, initiator channel pinned to the API-returned host key — same `runTerminalClient` rendering as
+local. The P2-complete proof (`apps/relay/test/cli-e2e.test.ts`) drives dock → dial-out → pair-redeem
+→ remote attach through the real CLI paths over a real HTTP control plane and a real TCP cell.
+
+**Next: P3** iOS app + attention plane · **P4** cloud sandboxes.

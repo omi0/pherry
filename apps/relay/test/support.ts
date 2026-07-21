@@ -46,15 +46,25 @@ export interface ControlPlane {
  * `MemoryRedis`, and a `FakeIdentityProvider` that accepts {@link HUMAN_TOKEN},
  * listening on an ephemeral port. `DIRECTOR_URL` is set so ticket mints carry a
  * `cellUrl`; the clock is the real one (TTLs are seconds, tests run in ms).
+ *
+ * `env` overrides individual config values on top of the defaults — the CLI
+ * end-to-end proof points `DIRECTOR_URL` at its own real TCP relay so a docked
+ * host and a remote controller both dial the same in-process cell.
  */
-export async function startControlPlane(): Promise<ControlPlane> {
+export async function startControlPlane(
+  env: Record<string, string | undefined> = {},
+): Promise<ControlPlane> {
   const db = drizzle(new PGlite(), { schema })
   await migrateDb(db)
   const app = buildServer({
     db,
     redis: new MemoryRedis(),
     identity: new FakeIdentityProvider(new Map([[HUMAN_TOKEN, EXT_USER]])),
-    config: loadConfig({ INTERNAL_API_KEY: INTERNAL_KEY, DIRECTOR_URL: 'https://relay.example' }),
+    config: loadConfig({
+      INTERNAL_API_KEY: INTERNAL_KEY,
+      DIRECTOR_URL: 'https://relay.example',
+      ...env,
+    }),
   })
   await app.listen({ port: 0, host: '127.0.0.1' })
   const address = app.server.address() as AddressInfo
@@ -69,7 +79,7 @@ export async function startControlPlane(): Promise<ControlPlane> {
 }
 
 /** Insert the org + user the human token resolves to (the IdP webhook's job in prod). */
-async function seedIdentity(db: Db): Promise<void> {
+export async function seedIdentity(db: Db): Promise<void> {
   const orgId = newOrgId()
   await db.insert(schema.orgs).values({ id: orgId, name: 'Acme' })
   await db

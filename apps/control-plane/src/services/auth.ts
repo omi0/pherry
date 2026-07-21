@@ -14,10 +14,12 @@
  */
 import { createHash, randomBytes } from 'node:crypto'
 import { eq } from 'drizzle-orm'
+import { z } from 'zod'
 import type { Db } from '../db/client.js'
 import type { Device, Host, Org, User } from '../db/schema.js'
 import { devices, hosts, orgs, users } from '../db/schema.js'
 import type { IdentityProvider } from '../identity.js'
+import type { RedisLike } from '../redis.js'
 
 /** SHA-256 of `input`, as lowercase hex. The at-rest form of every credential. */
 export function sha256Hex(input: string): string {
@@ -36,15 +38,34 @@ export interface MintedSecret {
 
 /**
  * Mint a credential: `<prefix>_<40 hex>` from 20 random bytes. `hk` = host
- * credential, `dt` = device token, `pt` = pair token. The returned `token` is the
- * only time the plaintext exists; store `hash` (and `prefix` for display) and
- * hand `token` to the client once.
+ * credential, `dt` = device token, `pt` = pair token, `ct` = CLI human token (the
+ * `dock` login result). The returned `token` is the only time the plaintext exists;
+ * store `hash` (and `prefix` for display) and hand `token` to the client once.
  */
-export function mintSecret(prefix: 'hk' | 'dt' | 'pt'): MintedSecret {
+export function mintSecret(prefix: 'hk' | 'dt' | 'pt' | 'ct'): MintedSecret {
   const random = randomBytes(20).toString('hex')
   const token = `${prefix}_${random}`
   return { token, hash: sha256Hex(token), prefix: random.slice(0, 8) }
 }
+
+/**
+ * The Redis key a minted `ct_` CLI token's grant lives at, addressed by the token's
+ * SHA-256 hash (the plaintext token is never stored). `services/cli-auth.ts` writes
+ * this record on a successful exchange; {@link authenticateHuman} reads it here.
+ */
+export function cliTokenKey(tokenHash: string): string {
+  return `cliauth:tok:${tokenHash}`
+}
+
+/**
+ * The JSON value stored under a {@link cliTokenKey}: the approving human's row id
+ * and the token's epoch-millisecond expiry. `expiresAt` is enforced against the
+ * injected clock on read (defence in depth — Redis will also have expired the key).
+ */
+export const CliTokenRecord = z.object({
+  userId: z.string(),
+  expiresAt: z.number(),
+})
 
 /** Extract the token from an `Authorization: Bearer <token>` header, or `null`. */
 export function parseBearer(header: string | undefined): string | null {
@@ -73,28 +94,76 @@ export interface DevicePrincipal {
 }
 
 /**
- * Resolve a human principal from an `Authorization` header. The token is verified
- * by the injected {@link IdentityProvider}; the external user id is looked up in
- * `users` (rows exist only via the IdP webhook sync) and inner-joined to its
- * primary org. Returns `null` when the token is invalid, the user is unknown, or
- * the user has no org (no tenancy to authorize against).
+ * Resolve a human principal from an `Authorization` header. Two token shapes carry
+ * a human:
  *
- * A host or device token is `null` here — the IdP does not verify it.
+ * - a `ct_` **CLI token** (minted by the `dock` login exchange) is resolved from
+ *   Redis — `cliauth:tok:<sha256>` → the approving user's row id → the same
+ *   `users`⋈`orgs` load below — with `expiresAt` re-checked against `now` for
+ *   defence in depth; and
+ * - any other token is an **opaque IdP bearer**, verified by the injected
+ *   {@link IdentityProvider}, whose external user id keys `users` (rows exist only
+ *   via the IdP webhook sync).
+ *
+ * Both paths inner-join the user to its primary org and return `null` when the
+ * token is invalid/expired, the user is unknown, or the user has no org (no tenancy
+ * to authorize against). A host (`hk_`) or device (`dt_`) token is `null` here — a
+ * `ct_` is a human token and never authenticates on those guards, and vice versa.
  */
 export async function authenticateHuman(
   db: Db,
   identity: IdentityProvider,
+  redis: RedisLike,
+  now: number,
   header: string | undefined,
 ): Promise<HumanPrincipal | null> {
   const token = parseBearer(header)
   if (token === null) return null
+  if (token.startsWith('ct_')) return authenticateCliToken(db, redis, now, token)
   const verified = await identity.verifyHuman(token)
   if (verified === null) return null
+  return loadHumanByClerkId(db, verified.externalUserId)
+}
+
+/** Load a human principal by IdP external id, inner-joining the primary org. */
+async function loadHumanByClerkId(db: Db, externalUserId: string): Promise<HumanPrincipal | null> {
   const rows = await db
     .select({ user: users, org: orgs })
     .from(users)
     .innerJoin(orgs, eq(users.primaryOrgId, orgs.id))
-    .where(eq(users.clerkUserId, verified.externalUserId))
+    .where(eq(users.clerkUserId, externalUserId))
+    .limit(1)
+  const row = rows[0]
+  if (row === undefined) return null
+  return { kind: 'human', user: row.user, org: row.org }
+}
+
+/**
+ * Resolve a `ct_` CLI token to its human. The token's SHA-256 keys a Redis grant
+ * (`{ userId, expiresAt }`); the row id then loads the user and its org exactly as
+ * the IdP path does. Returns `null` when the token is unknown/expired, the record
+ * is malformed, or the user/org no longer resolves — every failure undifferentiated.
+ */
+async function authenticateCliToken(
+  db: Db,
+  redis: RedisLike,
+  now: number,
+  token: string,
+): Promise<HumanPrincipal | null> {
+  const raw = await redis.get(cliTokenKey(sha256Hex(token)))
+  if (raw === null) return null
+  let record: z.infer<typeof CliTokenRecord>
+  try {
+    record = CliTokenRecord.parse(JSON.parse(raw))
+  } catch {
+    return null
+  }
+  if (record.expiresAt <= now) return null
+  const rows = await db
+    .select({ user: users, org: orgs })
+    .from(users)
+    .innerJoin(orgs, eq(users.primaryOrgId, orgs.id))
+    .where(eq(users.id, record.userId))
     .limit(1)
   const row = rows[0]
   if (row === undefined) return null
