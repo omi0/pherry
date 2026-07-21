@@ -3,7 +3,7 @@
  *
  * An end-to-end-encrypted, forward-secret framing layer that carries wire
  * records over any transport: a local pipe, a LAN socket, or an untrusted
- * relay. A two-message, pinned-static handshake (Noise-IK-inspired, over
+ * relay. A two-message, pinned-static handshake (the Noise-NK pattern, over
  * @noble X25519 / HKDF-SHA256 / XChaCha20-Poly1305) derives per-direction keys;
  * the record layer seals tagged {@link ChannelFrame}s with a deterministic,
  * counter-based nonce and strict in-order delivery.
@@ -37,6 +37,7 @@ export type { Handshake } from './handshake.js'
 
 // Frames
 export {
+  FRAME_TAG_BYTES,
   FrameTag,
   binaryFrame,
   controlFrame,

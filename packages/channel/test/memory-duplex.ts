@@ -59,3 +59,45 @@ export function memoryDuplexPair(taps?: { aToB?: Tap; bToA?: Tap }): MemoryPair 
 export function settle(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0))
 }
+
+/**
+ * A single, hand-driven {@link Duplex}: capture every outbound chunk, feed
+ * arbitrary inbound bytes into the channel's registered handler, and count
+ * `close()` calls. The raw-bytes injection seam the whole-unit
+ * {@link memoryDuplexPair} does not offer.
+ */
+export interface ManualDuplex extends Duplex {
+  /** Invoke the registered inbound handler with `bytes` (as a transport delivery would). */
+  feed(bytes: Uint8Array): void
+  /** Every chunk the channel wrote, in order. */
+  readonly sent: Uint8Array[]
+  /** How many times the channel called `close()`. */
+  readonly closeCount: number
+}
+
+/** Build a {@link ManualDuplex}. */
+export function manualDuplex(): ManualDuplex {
+  let handler: (bytes: Uint8Array) => void = () => {}
+  const sent: Uint8Array[] = []
+  let closeCount = 0
+  return {
+    send(bytes) {
+      sent.push(bytes.slice())
+    },
+    onMessage(h) {
+      handler = h
+    },
+    close() {
+      closeCount += 1
+    },
+    feed(bytes) {
+      handler(bytes)
+    },
+    get sent() {
+      return sent
+    },
+    get closeCount() {
+      return closeCount
+    },
+  }
+}

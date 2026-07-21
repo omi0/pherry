@@ -1,6 +1,8 @@
 /**
  * The two-message handshake — a pinned-static, ephemeral-both-sides,
- * responder-authenticated key exchange (Noise-IK-inspired).
+ * responder-authenticated key exchange. This is the **Noise-NK** pattern
+ * (`-> e ; <- e, ee, es`): the initiator carries no static key, and the
+ * responder's static is pinned (`K`nown) out-of-band rather than sent.
  *
  * ```
  * msg1  I -> R:  e_I.pub                       (32 bytes)
@@ -22,6 +24,12 @@
  * These state machines are pure: they generate an ephemeral key, expose the
  * outgoing message, and turn the peer's message into {@link SessionKeys}. The
  * transport ordering (who speaks first) is driven by {@link SecureChannel}.
+ *
+ * Secret hygiene: once {@link Handshake.consume} has derived the keys, it
+ * zero-fills its own ephemeral secret. This is **best-effort** — JS gives no
+ * guaranteed erasure (the runtime may have copied the bytes) — it only narrows
+ * the window in which the raw ephemeral lingers on the heap. The responder's
+ * long-term static is owned by the caller and is never wiped here.
  */
 import { x25519 } from '@noble/curves/ed25519.js'
 import { type SessionKeys, deriveSessionKeys } from './kdf.js'
@@ -42,7 +50,12 @@ export class HandshakeError extends Error {
 export interface Handshake {
   /** This peer's outgoing handshake message (its ephemeral public key). */
   readonly message: Uint8Array
-  /** Fold in the peer's message; returns the session keys or throws {@link HandshakeError}. */
+  /**
+   * Fold in the peer's message; returns the session keys or throws
+   * {@link HandshakeError}. Single-shot: on success the ephemeral secret this
+   * handshake holds is zero-filled (best-effort — see the module note), so a
+   * handshake must not be consumed twice.
+   */
   consume(peerMessage: Uint8Array): SessionKeys
 }
 
@@ -74,12 +87,15 @@ export function initiatorHandshake(pinnedHostStatic: Uint8Array): Handshake {
     consume(responderEphemeralPub: Uint8Array): SessionKeys {
       const dhEE = dh(ephemeral.secretKey, responderEphemeralPub, 'dh_ee')
       const dhES = dh(ephemeral.secretKey, pinnedHostStatic, 'dh_es')
-      return deriveSessionKeys({
+      const keys = deriveSessionKeys({
         dhEE,
         dhES,
         initiatorEphemeralPub: ephemeral.publicKey,
         responderEphemeralPub,
       })
+      // The ephemeral secret has served its purpose; wipe it (best-effort).
+      ephemeral.secretKey.fill(0)
+      return keys
     },
   }
 }
@@ -96,12 +112,15 @@ export function responderHandshake(ownStatic: KeyPair): Handshake {
     consume(initiatorEphemeralPub: Uint8Array): SessionKeys {
       const dhEE = dh(ephemeral.secretKey, initiatorEphemeralPub, 'dh_ee')
       const dhES = dh(ownStatic.secretKey, initiatorEphemeralPub, 'dh_es')
-      return deriveSessionKeys({
+      const keys = deriveSessionKeys({
         dhEE,
         dhES,
         initiatorEphemeralPub,
         responderEphemeralPub: ephemeral.publicKey,
       })
+      // Wipe the ephemeral secret (best-effort); the long-term static stays put.
+      ephemeral.secretKey.fill(0)
+      return keys
     },
   }
 }

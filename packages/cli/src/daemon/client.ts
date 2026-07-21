@@ -10,8 +10,11 @@
  *
  * The channel's provisional-handshake note applies (see `@pherry/channel`):
  * `ready()` resolves before the host is proven, and the first authenticated
- * inbound record is the real proof — a wrong pin surfaces as the channel closing,
- * which rejects the caller's in-flight request rather than hanging.
+ * inbound record is the real proof — the channel's `authenticated()` signal
+ * formalizes it. This path relies on the equivalent first inbound record of its
+ * in-flight request rather than awaiting `authenticated()` directly, so a wrong
+ * pin surfaces as the channel closing, which rejects that request rather than
+ * hanging.
  */
 import { SecureChannel } from '@pherry/channel'
 import { Controller } from '@pherry/sdk'

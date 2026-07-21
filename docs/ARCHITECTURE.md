@@ -85,7 +85,7 @@ plaintext-through-server property v1 had is designed out.
 - **Crypto:** the `@noble` suite (`@noble/curves` X25519, `@noble/hashes` HKDF-SHA256, `@noble/ciphers`
   XChaCha20-Poly1305) — pure-JS, audited, identical in Node / browser / React Native (controllers span
   all three).
-- **Handshake (Noise-IK-inspired):** pinned host static key + **ephemeral keys on both sides**. The host's
+- **Handshake (Noise-NK):** pinned host static key + **ephemeral keys on both sides**. The host's
   static public key is pinned in the pairing QR; the shared secret mixes `dh_ee` (both ephemerals →
   forward secrecy) and `dh_es` (ephemeral↔pinned-static → authenticates the host). A relay/MITM without
   the host's static private key derives different keys and the channel fails closed. Forward secrecy is

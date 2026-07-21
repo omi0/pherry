@@ -17,9 +17,11 @@
  *
  * The provisional-handshake note from `@pherry/channel` applies: `ready()`
  * resolves before the host is proven, and the first authenticated inbound record
- * (the session snapshot) is the real proof. A wrong pin therefore surfaces as the
- * channel closing once the snapshot fails to open — the terminal is restored and
- * the run resolves rather than hanging.
+ * (the session snapshot) is the real proof — the channel's `authenticated()`
+ * signal formalizes exactly this. This flow leans on the equivalent first-RPC /
+ * snapshot round-trip rather than awaiting `authenticated()` directly, so a wrong
+ * pin surfaces the same way: the channel closes once the snapshot fails to open —
+ * the terminal is restored and the run resolves rather than hanging.
  */
 import { stat } from 'node:fs/promises'
 import { SecureChannel } from '@pherry/channel'

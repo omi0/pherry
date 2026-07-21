@@ -16,10 +16,11 @@ pnpm add @pherry/channel
 
 > [!WARNING]
 > This is a **custom construction**. It is small, deliberately conservative, and
-> Noise-IK-inspired, but it is **not** a standardized protocol and has **not**
-> been externally reviewed. It **MUST** receive an independent security review
-> before it is trusted to guard traffic against an untrusted relay (the P2
-> milestone). Treat everything below as the specification that review will audit.
+> built on the **Noise-NK** pattern, but it is **not** a standardized protocol
+> and has **not** been externally reviewed. It **MUST** receive an independent
+> security review before it is trusted to guard traffic against an untrusted
+> relay (the P2 milestone). Treat everything below as the specification that
+> review will audit.
 
 ## Roles
 
@@ -35,6 +36,10 @@ out-of-band (the pairing QR) and treats it as the sole identity of the host.
 It is **never sent on the wire.**
 
 ## Handshake (two messages)
+
+This is the **Noise-NK** pattern (`-> e ; <- e, ee, es`): the initiator carries
+no static key of its own, and the responder's static is pinned (`K`nown)
+out-of-band rather than sent on the wire.
 
 ```
 msg1   I → R:   e_I.pub                      (32 bytes)
@@ -81,6 +86,15 @@ lacks `s_R.priv`) is not rejected during the handshake — the handshake complet
 but the two sides derive **different** keys, and the **first record fails to
 open**. That is where MITM detection lands.
 
+For that reason `ready()` (handshake complete) is only **provisional** host
+authentication: it resolves on any valid 32-byte ephemeral, even one an on-path
+attacker echoes. The real proof is the first inbound record opening, exposed as
+`authenticated(): Promise<void>` — it resolves when that record opens and
+**rejects** (as the channel closes) when the peer lacks the pinned static. Await
+`authenticated()`, not `ready()`, when you need certainty you reached the pinned
+host. In Pherry the host's immediate session snapshot satisfies it at once, so
+the first-RPC / snapshot flow already carries the proof.
+
 ## Record layer
 
 After the handshake, each direction is an independent authenticated stream.
@@ -117,6 +131,11 @@ After the handshake, each direction is an independent authenticated stream.
   `0x02` binary) plus an opaque payload the channel never inspects. The `uint32`
   length prefix lets the channel reframe over a raw byte stream that splits or
   coalesces writes.
+- **Symmetric size cap.** A single record's ciphertext may not exceed
+  `MAX_RECORD_BYTES` (4 MiB). The bound is enforced **both ways**: `send`
+  refuses to seal a frame whose record would exceed it (throwing before it emits
+  anything), and the receive path rejects any length prefix above it — so neither
+  peer can be made to emit, or buffer, an over-cap record.
 
 ### Errors
 
@@ -144,9 +163,10 @@ const responder = new SecureChannel({ role: 'responder', duplex, staticKey })
 // controller (initiator) — pins the host's static public key from the QR
 const initiator = new SecureChannel({ role: 'initiator', duplex, pinnedHostStatic })
 
-await initiator.ready()
+await initiator.ready() // handshake done (provisional); records may flow
 initiator.onFrame((frame) => {/* frame.tag, frame.payload */})
 initiator.send(controlFrame(bytes))
+await initiator.authenticated() // first inbound record opened → pinned host proven
 ```
 
 A `Duplex` is anything with `send(bytes)`, `onMessage(cb)`, and `close()`; it
@@ -183,10 +203,19 @@ authenticates the two endpoints and forwards bytes, but must never read them.
   layer adds no padding or cover traffic.
 - **Denial of service.** A relay can always refuse to forward, drop the
   connection, or corrupt bytes; the guarantee is detection and closure, not
-  availability.
+  availability. In particular, a peer can pin up to ~`MAX_RECORD_BYTES` (4 MiB)
+  of memory per connection by sending a large in-range length prefix and then
+  stalling before the record body — the deliberate per-connection high-water
+  mark. This layer stays a pure function over a `Duplex` and adds **no** timers;
+  policing idle or partial records is the relay / transport policy's job.
 - **Endpoint compromise.** If either peer's process is compromised, its live
   session keys are exposed. Forward secrecy protects *past* sessions, not a
-  concurrently-compromised one.
+  concurrently-compromised one. As a **best-effort** narrowing of the exposure
+  window, the channel zero-fills its ephemeral secret once the handshake derives
+  the session keys, and zero-fills the live direction keys and drops its cipher
+  references on close. This is not guaranteed erasure — JS gives no control over
+  copies the runtime or GC may retain, and it does not reach into the `@noble`
+  ciphers' internals.
 
 ## Develop
 

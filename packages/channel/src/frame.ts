@@ -19,6 +19,9 @@ export const FrameTag = {
 /** One of the {@link FrameTag} values. */
 export type FrameTag = (typeof FrameTag)[keyof typeof FrameTag]
 
+/** Bytes of the leading tag every encoded frame carries before its payload. */
+export const FRAME_TAG_BYTES = 1
+
 /** A tagged, opaque application message carried by the channel. */
 export interface ChannelFrame {
   /** Which lane the payload belongs to. */
@@ -39,9 +42,9 @@ export function binaryFrame(payload: Uint8Array): ChannelFrame {
 
 /** Encode a frame to `tag(1) || payload` bytes. */
 export function encodeFrame(frame: ChannelFrame): Uint8Array {
-  const out = new Uint8Array(1 + frame.payload.length)
+  const out = new Uint8Array(FRAME_TAG_BYTES + frame.payload.length)
   out[0] = frame.tag
-  out.set(frame.payload, 1)
+  out.set(frame.payload, FRAME_TAG_BYTES)
   return out
 }
 

@@ -3,16 +3,25 @@ import {
   type ChannelFrame,
   DecryptError,
   FrameTag,
+  HandshakeError,
+  MAX_RECORD_BYTES,
   ReplayError,
   SecureChannel,
   binaryFrame,
   controlFrame,
   generateKeyPair,
 } from '../src/index.js'
-import { memoryDuplexPair, settle } from './memory-duplex.js'
+import { manualDuplex, memoryDuplexPair, settle } from './memory-duplex.js'
 
 const bytes = (s: string) => new TextEncoder().encode(s)
 const text = (u: Uint8Array) => new TextDecoder().decode(u)
+
+/** A 4-byte big-endian uint32 record length prefix. */
+function u32(value: number): Uint8Array {
+  const out = new Uint8Array(4)
+  new DataView(out.buffer).setUint32(0, value, false)
+  return out
+}
 
 /** Assert a value is present and return it (keeps tests free of `!`). */
 function required<T>(value: T | null | undefined): T {
@@ -158,5 +167,299 @@ describe('SecureChannel', () => {
     ch.close()
     await expect(ch.ready()).rejects.toThrow()
     expect(() => ch.send(controlFrame(bytes('nope')))).toThrow()
+  })
+
+  // --- Handshake-level attacks ---------------------------------------------
+
+  it('closes with HandshakeError when the peer ephemeral is all-zero (low-order)', async () => {
+    const host = generateKeyPair()
+    // swap the responder's ephemeral for an all-zero (low-order) key at the channel
+    const { initiator } = connect(host.publicKey, host, {
+      bToA: (msg, index) => (index === 0 ? new Uint8Array(32) : msg),
+    })
+    let closedWith: Error | undefined
+    initiator.onClose((e) => {
+      closedWith = e
+    })
+    await expect(initiator.ready()).rejects.toBeInstanceOf(HandshakeError)
+    expect(closedWith).toBeInstanceOf(HandshakeError)
+  })
+
+  it('closes with a RangeError when an inbound length prefix exceeds MAX_RECORD_BYTES', async () => {
+    const host = generateKeyPair()
+    // replace the first application record with an oversized length prefix
+    const { initiator, responder } = connect(host.publicKey, host, {
+      bToA: (msg, index) => (index === 1 ? u32(MAX_RECORD_BYTES + 1) : msg),
+    })
+    await Promise.all([initiator.ready(), responder.ready()])
+    let closedWith: Error | undefined
+    initiator.onClose((e) => {
+      closedWith = e
+    })
+    responder.send(controlFrame(bytes('trigger')))
+    await settle()
+    expect(closedWith).toBeInstanceOf(RangeError)
+  })
+
+  it('send() rejects an over-max frame, stays usable, and the peer is unaffected', async () => {
+    const host = generateKeyPair()
+    const { initiator, responder, atR } = connect(host.publicKey, host)
+    await Promise.all([initiator.ready(), responder.ready()])
+    // payload alone is the whole cap, so the sealed record overruns it
+    expect(() => initiator.send(binaryFrame(new Uint8Array(MAX_RECORD_BYTES)))).toThrow(RangeError)
+    // the channel is untouched: a normal frame still flows to the peer
+    initiator.send(controlFrame(bytes('still here')))
+    await settle()
+    expect(initiator.isOpen).toBe(true)
+    expect(atR.map((f) => text(f.payload))).toEqual(['still here'])
+  })
+
+  it('treats a 32-byte handshake-looking message mid-session as record bytes (no re-handshake)', async () => {
+    const host = generateKeyPair()
+    // A 32-byte blob shaped like an ephemeral public key. Mid-session the channel
+    // is open, so #drain has no handshake branch: it reads bytes 0..3 as a length
+    // prefix and the remaining 28 as a record body — which fails to authenticate.
+    const injected = generateKeyPair().publicKey.slice()
+    new DataView(injected.buffer).setUint32(0, injected.length - 4, false)
+    const { initiator, responder } = connect(host.publicKey, host, {
+      bToA: (msg, index) => (index === 1 ? injected : msg),
+    })
+    await Promise.all([initiator.ready(), responder.ready()])
+    let closedWith: Error | undefined
+    initiator.onClose((e) => {
+      closedWith = e
+    })
+    responder.send(controlFrame(bytes('trigger')))
+    await settle()
+    expect(closedWith).toBeInstanceOf(DecryptError)
+    expect(initiator.isOpen).toBe(false) // died, not renegotiated
+  })
+
+  it('fatally rejects a zero-length record (len == 0) without hanging', async () => {
+    const host = generateKeyPair()
+    const { initiator, responder } = connect(host.publicKey, host, {
+      bToA: (msg, index) => (index === 1 ? u32(0) : msg),
+    })
+    await Promise.all([initiator.ready(), responder.ready()])
+    let closedWith: Error | undefined
+    initiator.onClose((e) => {
+      closedWith = e
+    })
+    responder.send(controlFrame(bytes('trigger')))
+    await settle()
+    expect(closedWith).toBeInstanceOf(DecryptError)
+  })
+
+  // --- #drain boundary: coalesced / split raw delivery ---------------------
+
+  it('completes the handshake and delivers the record under coalesced delivery', async () => {
+    const host = generateKeyPair()
+    // Hold the responder ephemeral, then emit `e_R || first record` as one chunk.
+    let heldEphemeral: Uint8Array | null = null
+    const { initiator, responder, atI } = connect(host.publicKey, host, {
+      bToA: (msg, index) => {
+        if (index === 0) {
+          heldEphemeral = msg
+          return null
+        }
+        if (index === 1 && heldEphemeral) {
+          const combined = new Uint8Array(heldEphemeral.length + msg.length)
+          combined.set(heldEphemeral, 0)
+          combined.set(msg, heldEphemeral.length)
+          heldEphemeral = null
+          return combined
+        }
+        return msg
+      },
+    })
+    await responder.ready()
+    responder.send(controlFrame(bytes('coalesced')))
+    await settle()
+    await initiator.ready()
+    expect(atI.map((f) => text(f.payload))).toEqual(['coalesced'])
+  })
+
+  it('completes the handshake and delivers the record under split delivery', async () => {
+    const host = generateKeyPair()
+    // Split the 32-byte responder ephemeral across two chunks (20 | 12).
+    const { initiator, responder, atI } = connect(host.publicKey, host, {
+      bToA: (msg, index) => (index === 0 ? [msg.slice(0, 20), msg.slice(20)] : msg),
+    })
+    await responder.ready()
+    responder.send(controlFrame(bytes('split')))
+    await settle()
+    await initiator.ready()
+    expect(atI.map((f) => text(f.payload))).toEqual(['split'])
+  })
+
+  // --- Initiator → responder direction (the other way) ---------------------
+
+  it('detects an initiator→responder tampered record', async () => {
+    const host = generateKeyPair()
+    const { initiator, responder } = connect(host.publicKey, host, {
+      aToB: (msg, index) => {
+        if (index === 1) msg[msg.length - 1] ^= 0x01
+        return msg
+      },
+    })
+    await Promise.all([initiator.ready(), responder.ready()])
+    let closedWith: Error | undefined
+    responder.onClose((e) => {
+      closedWith = e
+    })
+    initiator.send(controlFrame(bytes('to host')))
+    await settle()
+    expect(closedWith).toBeInstanceOf(DecryptError)
+  })
+
+  it('detects an initiator→responder replayed record', async () => {
+    const host = generateKeyPair()
+    const { initiator, responder, atR } = connect(host.publicKey, host, {
+      aToB: (msg, index) => (index === 1 ? [msg, msg] : msg),
+    })
+    await Promise.all([initiator.ready(), responder.ready()])
+    let closedWith: Error | undefined
+    responder.onClose((e) => {
+      closedWith = e
+    })
+    initiator.send(controlFrame(bytes('pay once')))
+    await settle()
+    expect(atR.length).toBe(1)
+    expect(closedWith).toBeInstanceOf(ReplayError)
+  })
+
+  // --- Shutdown / idempotency ----------------------------------------------
+
+  it('drops inbound bytes after close() and fires onClose exactly once', () => {
+    const dup = manualDuplex()
+    const ch = new SecureChannel({
+      role: 'initiator',
+      duplex: dup,
+      pinnedHostStatic: generateKeyPair().publicKey,
+    })
+    let closeCount = 0
+    ch.onClose(() => {
+      closeCount++
+    })
+    ch.close()
+    // post-close deliveries must be no-ops (no throw, no second close)
+    dup.feed(new Uint8Array(32))
+    dup.feed(new Uint8Array([0, 0, 0, 4, 1, 2, 3, 4]))
+    expect(closeCount).toBe(1)
+  })
+
+  it('is idempotent: double close() fires onClose (and duplex close) exactly once', () => {
+    const dup = manualDuplex()
+    const ch = new SecureChannel({
+      role: 'initiator',
+      duplex: dup,
+      pinnedHostStatic: generateKeyPair().publicKey,
+    })
+    let closeCount = 0
+    ch.onClose(() => {
+      closeCount++
+    })
+    ch.close()
+    ch.close()
+    expect(closeCount).toBe(1)
+    expect(dup.closeCount).toBe(1)
+  })
+
+  it('fires onClose exactly once when close() follows a fatal error', async () => {
+    const host = generateKeyPair()
+    const { initiator, responder } = connect(host.publicKey, host, {
+      bToA: (msg, index) => (index === 1 ? u32(MAX_RECORD_BYTES + 1) : msg),
+    })
+    await Promise.all([initiator.ready(), responder.ready()])
+    let closeCount = 0
+    initiator.onClose(() => {
+      closeCount++
+    })
+    responder.send(controlFrame(bytes('trigger')))
+    await settle()
+    expect(closeCount).toBe(1) // the fatal close
+    initiator.close() // an explicit close afterwards is a no-op
+    expect(closeCount).toBe(1)
+  })
+
+  // --- Handler isolation (F3) & authentication (F5) ------------------------
+
+  it('isolates a throwing onFrame handler: the channel survives and later frames arrive', async () => {
+    const host = generateKeyPair()
+    const { a, b } = memoryDuplexPair()
+    const handlerErrors: Error[] = []
+    const initiator = new SecureChannel({
+      role: 'initiator',
+      duplex: a,
+      pinnedHostStatic: host.publicKey,
+      onHandlerError: (e) => handlerErrors.push(e),
+    })
+    const responder = new SecureChannel({ role: 'responder', duplex: b, staticKey: host })
+    const received: string[] = []
+    let firstFrame = true
+    initiator.onFrame((f) => {
+      received.push(text(f.payload))
+      if (firstFrame) {
+        firstFrame = false
+        throw new Error('boom')
+      }
+    })
+    await Promise.all([initiator.ready(), responder.ready()])
+    responder.send(controlFrame(bytes('one')))
+    responder.send(controlFrame(bytes('two')))
+    await settle()
+    expect(received).toEqual(['one', 'two']) // both delivered despite the throw
+    expect(initiator.isOpen).toBe(true) // channel stayed healthy
+    expect(handlerErrors.map((e) => e.message)).toEqual(['boom'])
+  })
+
+  it('allows send() from within an onFrame callback, preserving order', async () => {
+    const host = generateKeyPair()
+    const { a, b } = memoryDuplexPair()
+    const initiator = new SecureChannel({
+      role: 'initiator',
+      duplex: a,
+      pinnedHostStatic: host.publicKey,
+    })
+    const responder = new SecureChannel({ role: 'responder', duplex: b, staticKey: host })
+    const atR: string[] = []
+    responder.onFrame((f) => atR.push(text(f.payload)))
+    let n = 0
+    initiator.onFrame(() => {
+      n += 1
+      initiator.send(controlFrame(bytes(`echo-${n}`)))
+    })
+    await Promise.all([initiator.ready(), responder.ready()])
+    responder.send(controlFrame(bytes('a')))
+    responder.send(controlFrame(bytes('b')))
+    await settle()
+    expect(atR).toEqual(['echo-1', 'echo-2'])
+  })
+
+  it('authenticated() resolves only after the first inbound record opens, not on ready()', async () => {
+    const host = generateKeyPair()
+    const { initiator, responder } = connect(host.publicKey, host)
+    let authed = false
+    void initiator.authenticated().then(() => {
+      authed = true
+    })
+    await Promise.all([initiator.ready(), responder.ready()])
+    await settle()
+    expect(initiator.isOpen).toBe(true)
+    expect(authed).toBe(false) // handshake alone is only provisional
+    responder.send(controlFrame(bytes('proof')))
+    await settle()
+    expect(authed).toBe(true)
+  })
+
+  it('authenticated() rejects when the channel closes before any inbound record (wrong pin)', async () => {
+    const host = generateKeyPair()
+    const wrongPin = generateKeyPair().publicKey
+    const { initiator, responder } = connect(wrongPin, host)
+    await Promise.all([initiator.ready(), responder.ready()])
+    const authPromise = initiator.authenticated()
+    responder.send(controlFrame(bytes('secret')))
+    await settle()
+    await expect(authPromise).rejects.toBeInstanceOf(DecryptError)
   })
 })
