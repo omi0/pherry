@@ -1,0 +1,54 @@
+import { describe, expect, it } from 'vitest'
+import { OKM_BYTES, RECORD_KEY_BYTES, SESSION_ID_BYTES, deriveSessionKeys } from '../src/index.js'
+
+const hex = (u: Uint8Array) => Buffer.from(u).toString('hex')
+const fill = (b: number) => new Uint8Array(32).fill(b)
+
+const INPUT = {
+  dhEE: fill(0x01),
+  dhES: fill(0x02),
+  initiatorEphemeralPub: fill(0x03),
+  responderEphemeralPub: fill(0x04),
+}
+
+describe('kdf', () => {
+  it('is deterministic', () => {
+    const a = deriveSessionKeys(INPUT)
+    const b = deriveSessionKeys(INPUT)
+    expect(hex(a.keyI2R)).toBe(hex(b.keyI2R))
+    expect(hex(a.keyR2I)).toBe(hex(b.keyR2I))
+    expect(hex(a.sessionId)).toBe(hex(b.sessionId))
+  })
+
+  it('matches the pinned test vector', () => {
+    const keys = deriveSessionKeys(INPUT)
+    expect(hex(keys.keyI2R)).toBe(
+      '3c9c036c5cc9a41cfa2a9c3ac4226fb4c1e538ef3c669763e45ddef68ac3ae09',
+    )
+    expect(hex(keys.keyR2I)).toBe(
+      '5ed41ffb5fd2fc1914a378abaf0c78f178bc02ff27d152aa1bd7bf3febf9e571',
+    )
+    expect(hex(keys.sessionId)).toBe(
+      'fb15e7dc12ff45f7436927fdd032d0010ea7a6e51322e2f7b21a380914edd27b',
+    )
+  })
+
+  it('splits the 96-byte okm into three distinct 32-byte outputs', () => {
+    const keys = deriveSessionKeys(INPUT)
+    expect(OKM_BYTES).toBe(96)
+    expect(keys.keyI2R.length).toBe(RECORD_KEY_BYTES)
+    expect(keys.keyR2I.length).toBe(RECORD_KEY_BYTES)
+    expect(keys.sessionId.length).toBe(SESSION_ID_BYTES)
+    // the three slices are independent regions of the okm
+    expect(hex(keys.keyI2R)).not.toBe(hex(keys.keyR2I))
+    expect(hex(keys.keyR2I)).not.toBe(hex(keys.sessionId))
+  })
+
+  it('binds both ephemeral keys via the salt (tamper changes every output)', () => {
+    const base = deriveSessionKeys(INPUT)
+    const tampered = deriveSessionKeys({ ...INPUT, responderEphemeralPub: fill(0x05) })
+    expect(hex(tampered.keyI2R)).not.toBe(hex(base.keyI2R))
+    expect(hex(tampered.keyR2I)).not.toBe(hex(base.keyR2I))
+    expect(hex(tampered.sessionId)).not.toBe(hex(base.sessionId))
+  })
+})
