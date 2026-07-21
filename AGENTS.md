@@ -15,7 +15,8 @@ One versioned, capability-negotiated protocol — **the wire**. Exactly two role
 
 The control plane is a **router**, not a brain: it authenticates + pairs the two ends and
 relays **end-to-end-encrypted** frames between them. It never reads a session's content.
-Full design (diagrams): (private link removed)
+Full design + roadmap: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) (visual version:
+(private link removed)).
 
 ## Invariants — never violate these
 
