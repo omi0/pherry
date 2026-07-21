@@ -1,0 +1,12 @@
+packages:
+  - protocol
+  - packages/*
+  - apps/*
+onlyBuiltDependencies:
+  - '@biomejs/biome'
+  - esbuild
+  - node-pty
+allowBuilds:
+  '@biomejs/biome': true
+  esbuild: true
+  node-pty: true
