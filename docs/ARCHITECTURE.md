@@ -100,6 +100,40 @@ plaintext-through-server property v1 had is designed out.
 
 ---
 
+## 4a. Identity & authorization — where Clerk fits
+
+The secure channel (§4) proves *confidentiality* and cryptographically authenticates the **host** to
+the controller (the pinned static key). It says nothing about *who you are* or *what you may reach* —
+that is the account/authorization layer, and it lives in the control plane. Three kinds of principal,
+exactly as v1:
+
+- **Humans** — the person, on the dashboard, the iOS app, and `pherry dock`. Authenticated by **Clerk**
+  (OAuth/email → a session token). Clerk is the human identity provider and the org/tenancy source;
+  live-proven in v1, kept in v2.
+- **Hosts** — the laptop daemon, a cloud sandbox. A machine can't do OAuth, so it holds a **host
+  credential** (a host key), minted by the control plane during `dock` while the human is
+  Clerk-authenticated, and bound to their account/org.
+- **Controllers / devices** — the phone (and CLI). A **device token** bound to the user's Clerk identity,
+  obtained via **QR pairing**: `dock` mints a one-time pair token (Clerk-authed), the phone redeems it
+  for a Clerk sign-in token → a real Clerk session + a registered device. (The v1 phone-pair flow,
+  carried forward.)
+
+Clerk and the E2EE channel are **complementary**: the channel authenticates the *host* to you and hides
+*content*; Clerk/device-tokens authenticate *you* to the *control plane* and authorize *routing* (a
+controller may only reach a host in its own org). Because of §4, the relay authorizes the *pairing*
+without ever seeing the *content*.
+
+**Open-core boundary.** Clerk is a dependency of the **proprietary control plane only**. The open
+protocol carries an **opaque bearer token**, never "a Clerk JWT" — so the open `host`/`cli`/`sdk` do not
+depend on Clerk, and a self-hoster can back their own control plane with any identity provider. The
+hosted plane happens to validate that token via Clerk.
+
+**When it lands.** None of this is in the P1 local-only tool (same-machine, trust-by-filesystem: the host
+key in `~/.pherry`, `attach` reads the local public key). Identity/Clerk enters at **P2**, with the
+control plane, the relay, and `dock`.
+
+---
+
 ## 5. Execution backends — the cloud-sandbox abstraction
 
 A host runs sessions; a session runs on a **`Backend`**. `spawn` / `write` / `resize` / `onOutput` /
@@ -238,8 +272,8 @@ frame codec, JSON-Schema export. The OSS spec and the foundation everything hang
 *At the end of P1 you can clone the repo and run a local, end-to-end-encrypted terminal mirror with no cloud.*
 
 ### ⏭ P2 — relay + control plane + pairing → the phone
-The blind director→cell **relay**, the stateless **control plane** (auth, tenancy, device/host registry),
-and **`dock`** (login + QR phone pairing). After P2 a controller reaches a host **over the internet**,
+The blind director→cell **relay**, the stateless **control plane** (Clerk-backed human auth + host/device
+credentials + tenancy + registry, see §4a), and **`dock`** (Clerk login + QR phone pairing). After P2 a controller reaches a host **over the internet**,
 E2EE, and the phone can be the second viewer of a boarded session. New: `apps/control-plane`,
 `apps/relay`, and `dock`'s cloud half.
 
