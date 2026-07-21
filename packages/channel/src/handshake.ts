@@ -76,8 +76,13 @@ function dh(ownSecret: Uint8Array, peerPublic: Uint8Array, label: string): Uint8
  * Begin the initiator (controller) side. `pinnedHostStatic` is the responder's
  * 32-byte static public key, obtained out-of-band and pinned. The outgoing
  * `message` is `e_I.pub`; `consume(e_R.pub)` derives the session keys.
+ *
+ * An optional `context` is bound into the key schedule; both peers must supply
+ * identical context bytes or they derive different keys. Omitting it (or passing
+ * an empty context) is the default and is byte-identical to a context-free
+ * handshake.
  */
-export function initiatorHandshake(pinnedHostStatic: Uint8Array): Handshake {
+export function initiatorHandshake(pinnedHostStatic: Uint8Array, context?: Uint8Array): Handshake {
   if (pinnedHostStatic.length !== KEY_BYTES) {
     throw new HandshakeError(`pinned host static: expected a ${KEY_BYTES}-byte public key`)
   }
@@ -92,6 +97,7 @@ export function initiatorHandshake(pinnedHostStatic: Uint8Array): Handshake {
         dhES,
         initiatorEphemeralPub: ephemeral.publicKey,
         responderEphemeralPub,
+        ...(context !== undefined ? { context } : {}),
       })
       // The ephemeral secret has served its purpose; wipe it (best-effort).
       ephemeral.secretKey.fill(0)
@@ -104,8 +110,13 @@ export function initiatorHandshake(pinnedHostStatic: Uint8Array): Handshake {
  * Begin the responder (host) side. `ownStatic` is the host's long-term static
  * keypair `s_R`. The outgoing `message` is `e_R.pub`; `consume(e_I.pub)` derives
  * the session keys.
+ *
+ * An optional `context` is bound into the key schedule; both peers must supply
+ * identical context bytes or they derive different keys. Omitting it (or passing
+ * an empty context) is the default and is byte-identical to a context-free
+ * handshake.
  */
-export function responderHandshake(ownStatic: KeyPair): Handshake {
+export function responderHandshake(ownStatic: KeyPair, context?: Uint8Array): Handshake {
   const ephemeral = generateKeyPair()
   return {
     message: ephemeral.publicKey,
@@ -117,6 +128,7 @@ export function responderHandshake(ownStatic: KeyPair): Handshake {
         dhES,
         initiatorEphemeralPub,
         responderEphemeralPub: ephemeral.publicKey,
+        ...(context !== undefined ? { context } : {}),
       })
       // Wipe the ephemeral secret (best-effort); the long-term static stays put.
       ephemeral.secretKey.fill(0)

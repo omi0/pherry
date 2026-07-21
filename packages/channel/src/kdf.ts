@@ -4,9 +4,9 @@
  * session id.
  *
  * ```
- * ikm  = dh_ee || dh_es                                   (64 bytes)
- * salt = SHA256("pherry/channel/v1/salt" || e_I.pub || e_R.pub)
- * okm  = HKDF-SHA256(ikm, salt, "pherry/channel/v1", 96)  (96 bytes)
+ * ikm  = dh_ee || dh_es                                             (64 bytes)
+ * salt = SHA256("pherry/channel/v1/salt" || e_I.pub || e_R.pub || context)
+ * okm  = HKDF-SHA256(ikm, salt, "pherry/channel/v1", 96)           (96 bytes)
  *
  * key_i2r    = okm[0..32]     initiator -> responder record key
  * key_r2i    = okm[32..64]    responder -> initiator record key
@@ -15,9 +15,15 @@
  *
  * Both ephemeral public keys are folded into the salt, so the whole handshake
  * transcript is bound into every derived key: flip a byte of either ephemeral
- * and all three outputs change. `dh_ee` supplies forward secrecy (both sides are
- * ephemeral); `dh_es` authenticates the responder (only the pinned static holder
- * can reproduce it).
+ * and all three outputs change. An optional application `context` — routing
+ * identifiers a relay transport binds in, for example — is appended as the
+ * final, variable-length salt component; an absent or empty context contributes
+ * zero bytes, so derivation without one is byte-identical to a context-free
+ * schedule (and to every already-deployed peer). Concatenation is unambiguous
+ * because every earlier component is fixed-length (the constant label, two
+ * 32-byte keys) and the context is the tail. `dh_ee` supplies forward secrecy
+ * (both sides are ephemeral); `dh_es` authenticates the responder (only the
+ * pinned static holder can reproduce it).
  */
 import { hkdf } from '@noble/hashes/hkdf.js'
 import { sha256 } from '@noble/hashes/sha256.js'
@@ -30,6 +36,9 @@ const SALT_LABEL = encoder.encode('pherry/channel/v1/salt')
 
 /** HKDF `info` string — binds the output to this channel version. */
 const HKDF_INFO = encoder.encode('pherry/channel/v1')
+
+/** Zero-length context: appended when none is supplied, contributing no bytes. */
+const EMPTY_CONTEXT = new Uint8Array(0)
 
 /** Byte length of one record key and of the session id. */
 export const RECORD_KEY_BYTES = 32
@@ -58,6 +67,14 @@ export interface KeyScheduleInput {
   readonly initiatorEphemeralPub: Uint8Array
   /** The responder's ephemeral public key (`e_R.pub`). */
   readonly responderEphemeralPub: Uint8Array
+  /**
+   * Optional application context, appended to the salt as its final,
+   * variable-length component (e.g. a relay transport's routing identifiers).
+   * Both peers must supply identical bytes or they derive different keys. An
+   * absent or empty context contributes zero bytes, so the derivation is
+   * byte-identical to a context-free schedule.
+   */
+  readonly context?: Uint8Array
 }
 
 /**
@@ -68,7 +85,12 @@ export interface KeyScheduleInput {
 export function deriveSessionKeys(input: KeyScheduleInput): SessionKeys {
   const ikm = concatBytes(input.dhEE, input.dhES)
   const salt = sha256(
-    concatBytes(SALT_LABEL, input.initiatorEphemeralPub, input.responderEphemeralPub),
+    concatBytes(
+      SALT_LABEL,
+      input.initiatorEphemeralPub,
+      input.responderEphemeralPub,
+      input.context ?? EMPTY_CONTEXT,
+    ),
   )
   const okm = hkdf(sha256, ikm, salt, HKDF_INFO, OKM_BYTES)
   return {

@@ -48,6 +48,7 @@ Full design + roadmap: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) (visual 
 | `protocol/` | the wire: zod schemas → types, capabilities, RPC envelope, `METHODS`, PTY frame codec | **open** |
 | `packages/host/` | session runtime · `Backend` (+ LocalPty/Fake) · `Mirror` (headless xterm) · `CustodyDesk` · `serveConnection` | open |
 | `packages/channel/` | the **audited** E2EE secure channel (`@noble`) | open |
+| `packages/relay-core/` | the blind relay rendezvous: outer protocol · host proof · cell · relay transport adapters | open |
 | `packages/sdk/` | the `Controller` client | open |
 | `packages/transport-node/` | node-socket `Duplex` + unix listen/connect | open |
 | `packages/cli/` | the `pherry` CLI + the reusable **`runTerminalClient`** engine | open |
@@ -77,11 +78,19 @@ Open packages must have **no import edge into `apps/`**. `apps/` may depend on t
 
 ## Status (as of the last commit)
 
-**Done, green, pushed** — 6 packages, 257 tests: `protocol` (97) · `host` (59) · `channel` (45,
-audited) · `sdk` (5) · `transport-node` (6) · `cli` (45). Leg 3c is complete: `pherry board` a
-repo, then typing `gemini` (or `claude`/`codex`/…) is intercepted by a PATH shim → the persistent
-`pherry serve` daemon takes custody → the agent's TUI opens in your terminal while a second viewer
-(`pherry attach`) mirrors the same host-owned session — the full local, E2EE, multi-viewer custody flow.
+**Done, green, pushed** — 7 packages, 325 tests: `protocol` (97) · `host` (59) · `channel` (71,
+audited) · `relay-core` (42) · `sdk` (5) · `transport-node` (6) · `cli` (45). Leg 3c gave the full
+local, E2EE, multi-viewer custody flow: `pherry board` a repo, then typing `gemini` (or
+`claude`/`codex`/…) is intercepted by a PATH shim → the persistent `pherry serve` daemon takes
+custody → the agent's TUI opens in your terminal while a second viewer (`pherry attach`) mirrors the
+same host-owned session.
 
-**Next: P2** relay + control plane + pairing ([`docs/leg-P2.md`](./docs/leg-P2.md)) · **P3** iOS app +
-attention plane · **P4** cloud sandboxes.
+**Leg P2a is done:** `@pherry/relay-core` is the open, blind director→cell rendezvous — the outer
+coordination protocol, a DH host proof (possession of the channel static key), the injected
+authorizer seam, a reference cell, and host/controller transport adapters that each expose a
+`@pherry/channel` `Duplex`, so `serveConnection` / `Controller` run **unchanged** over a
+relay-bridged connection with routing identifiers bound into the channel context (a mis-splice fails
+closed).
+
+**Next: P2b** `apps/control-plane` + `apps/relay` (proprietary) ([`docs/leg-P2.md`](./docs/leg-P2.md))
+· **P2c** `dock` + host dial-out · **P3** iOS app + attention plane · **P4** cloud sandboxes.

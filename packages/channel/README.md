@@ -67,7 +67,7 @@ dh_es (responder) = X25519(s_R.priv, e_I.pub)
 
 ```
 ikm  = dh_ee || dh_es                                        (64 bytes)
-salt = SHA256("pherry/channel/v1/salt" || e_I.pub || e_R.pub)
+salt = SHA256("pherry/channel/v1/salt" || e_I.pub || e_R.pub || context)
 okm  = HKDF-SHA256(ikm, salt, info = "pherry/channel/v1", 96 bytes)
 
 key_i2r    = okm[0..32]      initiator → responder record key
@@ -79,7 +79,37 @@ Both ephemeral public keys are folded into the `salt`, binding the entire
 handshake transcript into every output: flip a byte of either ephemeral and all
 three derived values change, so a tampered handshake can never yield a usable
 key. Both peers order the ephemerals identically (`e_I.pub` then `e_R.pub`), so
-they compute the same salt and therefore the same keys.
+they compute the same salt and therefore the same keys. The trailing `context`
+is an optional application input (see [Context binding](#context-binding)); it
+is the final, variable-length salt component, and an absent or empty one
+contributes zero bytes.
+
+### Context binding
+
+`context` is an **optional, application-supplied byte string** bound into the
+key schedule — the one hook the channel exposes for a layer above it to fold its
+own identifiers into what the handshake already authenticates. Its intended use
+is an untrusted **relay transport**: binding the routing identifiers it assigns
+(a host id, a connection ticket) into `context` means a malicious or buggy relay
+that splices a controller onto the wrong host produces two peers with mismatched
+context — they derive different keys, so the first record fails to open and the
+session **fails closed**, exactly as a wrong pin does. The channel binds the
+value; it never interprets it.
+
+- **Identical bytes, both peers.** Context is *not* transmitted or negotiated.
+  Each peer supplies it out-of-band, and the two must be byte-for-byte equal.
+  Any difference — including one peer supplying a context and the other not —
+  makes the derived keys diverge; the handshake still completes (only ephemeral
+  public keys cross the wire), but the **first inbound record fails to
+  authenticate**, the channel closes, and `authenticated()` rejects. This is the
+  same fail-closed path as a wrong pin, now also covering a mis-bridged relay.
+- **Appended last, unambiguous.** `context` is concatenated after the
+  fixed-length label and the two 32-byte ephemeral keys, so the salt preimage
+  parses without a delimiter regardless of the context's length.
+- **Backward compatible.** Omitting `context`, or passing an empty one,
+  contributes zero bytes to the salt, so the derivation is **byte-identical** to
+  the context-free schedule. Peers that never set it — and every already-deployed
+  peer — are unaffected.
 
 Because the pinned static is never transmitted, a **wrong pin** (or a relay that
 lacks `s_R.priv`) is not rejected during the handshake — the handshake completes,

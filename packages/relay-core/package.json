@@ -1,0 +1,38 @@
+{
+  "name": "@pherry/relay-core",
+  "version": "0.1.0",
+  "description": "The Pherry blind relay — the director/cell rendezvous protocol, host proof, and the relay transport adapters that expose a channel Duplex over an untrusted cell.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.8.1",
+    "@noble/hashes": "^1.7.1",
+    "@pherry/channel": "workspace:*",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@pherry/host": "workspace:*",
+    "@pherry/protocol": "workspace:*",
+    "@pherry/sdk": "workspace:*",
+    "@types/node": "^20.11.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

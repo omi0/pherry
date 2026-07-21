@@ -235,6 +235,7 @@ so the open host talks the same wire to our hosted control plane *or* a self-hos
 | `protocol/` | the wire | **open** |
 | `packages/host/` | session runtime · backends · custody · serve | open |
 | `packages/channel/` | audited E2EE secure channel | open |
+| `packages/relay-core/` | the blind relay rendezvous: outer protocol · host proof · cell · relay transport adapters | open |
 | `packages/sdk/` | controller client | open |
 | `packages/transport-node/` | node-socket transport | open |
 | `packages/cli/` | the `pherry` CLI + `runTerminalClient` engine | open |

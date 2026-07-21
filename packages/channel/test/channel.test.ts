@@ -462,4 +462,79 @@ describe('SecureChannel', () => {
     await settle()
     await expect(authPromise).rejects.toBeInstanceOf(DecryptError)
   })
+
+  // --- Context binding (relay routing identifiers, F-P2a) ------------------
+
+  it('same context on both sides: handshake completes, frames flow, authenticated() resolves', async () => {
+    const host = generateKeyPair()
+    const context = bytes('host-1|ticket-abc')
+    const { a, b } = memoryDuplexPair()
+    const initiator = new SecureChannel({
+      role: 'initiator',
+      duplex: a,
+      pinnedHostStatic: host.publicKey,
+      context,
+    })
+    const responder = new SecureChannel({ role: 'responder', duplex: b, staticKey: host, context })
+    const atR: string[] = []
+    responder.onFrame((f) => atR.push(text(f.payload)))
+    await Promise.all([initiator.ready(), responder.ready()])
+    responder.send(controlFrame(bytes('proof')))
+    initiator.send(controlFrame(bytes('to host')))
+    await settle()
+    await expect(initiator.authenticated()).resolves.toBeUndefined()
+    expect(initiator.isOpen).toBe(true)
+    expect(atR).toEqual(['to host'])
+  })
+
+  it('mismatched context (A vs B): first inbound record fails, channel closes, authenticated() rejects', async () => {
+    const host = generateKeyPair()
+    const { a, b } = memoryDuplexPair()
+    const initiator = new SecureChannel({
+      role: 'initiator',
+      duplex: a,
+      pinnedHostStatic: host.publicKey,
+      context: bytes('host-1|ticket-abc'),
+    })
+    const responder = new SecureChannel({
+      role: 'responder',
+      duplex: b,
+      staticKey: host,
+      context: bytes('host-2|ticket-xyz'),
+    })
+    // The handshake still "completes" — only ephemeral public keys cross the wire.
+    await Promise.all([initiator.ready(), responder.ready()])
+    let closedWith: Error | undefined
+    initiator.onClose((e) => {
+      closedWith = e
+    })
+    const authPromise = initiator.authenticated()
+    responder.send(controlFrame(bytes('secret')))
+    await settle()
+    expect(closedWith).toBeInstanceOf(DecryptError)
+    expect(initiator.isOpen).toBe(false)
+    await expect(authPromise).rejects.toBeInstanceOf(DecryptError)
+  })
+
+  it('context on one side only: same fail-closed outcome', async () => {
+    const host = generateKeyPair()
+    const { a, b } = memoryDuplexPair()
+    const initiator = new SecureChannel({
+      role: 'initiator',
+      duplex: a,
+      pinnedHostStatic: host.publicKey,
+      context: bytes('host-1|ticket-abc'),
+    })
+    const responder = new SecureChannel({ role: 'responder', duplex: b, staticKey: host })
+    await Promise.all([initiator.ready(), responder.ready()])
+    let closedWith: Error | undefined
+    initiator.onClose((e) => {
+      closedWith = e
+    })
+    const authPromise = initiator.authenticated()
+    responder.send(controlFrame(bytes('secret')))
+    await settle()
+    expect(closedWith).toBeInstanceOf(DecryptError)
+    await expect(authPromise).rejects.toBeInstanceOf(DecryptError)
+  })
 })

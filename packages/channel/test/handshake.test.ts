@@ -76,4 +76,45 @@ describe('handshake', () => {
     )
     expect(() => opener.open(sealer.seal(new Uint8Array([9])))).toThrow(DecryptError)
   })
+
+  describe('context binding', () => {
+    const ctx = (s: string) => new TextEncoder().encode(s)
+
+    it('both sides with the SAME context derive identical keys', () => {
+      const host = generateKeyPair()
+      const context = ctx('host-1|ticket-abc')
+      const initiator = initiatorHandshake(host.publicKey, context)
+      const responder = responderHandshake(host, context)
+      const iKeys = initiator.consume(responder.message)
+      const rKeys = responder.consume(initiator.message)
+      expect(hex(iKeys.keyI2R)).toBe(hex(rKeys.keyI2R))
+      expect(hex(iKeys.keyR2I)).toBe(hex(rKeys.keyR2I))
+      expect(hex(iKeys.sessionId)).toBe(hex(rKeys.sessionId))
+    })
+
+    it('DIFFERENT contexts complete the DH but derive different keys', () => {
+      const host = generateKeyPair()
+      // A malicious relay splices the initiator (bound to host-1) onto the real
+      // host, which was reached under a different routing identifier.
+      const initiator = initiatorHandshake(host.publicKey, ctx('host-1|ticket-abc'))
+      const responder = responderHandshake(host, ctx('host-2|ticket-xyz'))
+      // The DH still succeeds — only ephemeral public keys cross the wire.
+      const iKeys = initiator.consume(responder.message)
+      const rKeys = responder.consume(initiator.message)
+      expect(hex(iKeys.keyI2R)).not.toBe(hex(rKeys.keyI2R))
+      // and a record the responder seals cannot be opened by the initiator
+      const sealer = new Sealer(rKeys.keyR2I, rKeys.sessionId, Direction.ResponderToInitiator)
+      const opener = new Opener(iKeys.keyR2I, iKeys.sessionId, Direction.ResponderToInitiator)
+      expect(() => opener.open(sealer.seal(new Uint8Array([1])))).toThrow(DecryptError)
+    })
+
+    it('a context on one side and none on the other derives different keys', () => {
+      const host = generateKeyPair()
+      const initiator = initiatorHandshake(host.publicKey, ctx('host-1|ticket-abc'))
+      const responder = responderHandshake(host)
+      const iKeys = initiator.consume(responder.message)
+      const rKeys = responder.consume(initiator.message)
+      expect(hex(iKeys.keyI2R)).not.toBe(hex(rKeys.keyI2R))
+    })
+  })
 })

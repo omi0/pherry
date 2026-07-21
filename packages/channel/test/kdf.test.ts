@@ -3,6 +3,7 @@ import { OKM_BYTES, RECORD_KEY_BYTES, SESSION_ID_BYTES, deriveSessionKeys } from
 
 const hex = (u: Uint8Array) => Buffer.from(u).toString('hex')
 const fill = (b: number) => new Uint8Array(32).fill(b)
+const bytes = (s: string) => new TextEncoder().encode(s)
 
 const INPUT = {
   dhEE: fill(0x01),
@@ -50,5 +51,39 @@ describe('kdf', () => {
     expect(hex(tampered.keyI2R)).not.toBe(hex(base.keyI2R))
     expect(hex(tampered.keyR2I)).not.toBe(hex(base.keyR2I))
     expect(hex(tampered.sessionId)).not.toBe(hex(base.sessionId))
+  })
+
+  describe('context', () => {
+    it('absent context is byte-identical to an empty context (backward compatible)', () => {
+      const without = deriveSessionKeys(INPUT)
+      const empty = deriveSessionKeys({ ...INPUT, context: new Uint8Array(0) })
+      expect(hex(empty.keyI2R)).toBe(hex(without.keyI2R))
+      expect(hex(empty.keyR2I)).toBe(hex(without.keyR2I))
+      expect(hex(empty.sessionId)).toBe(hex(without.sessionId))
+    })
+
+    it('a non-empty context changes all three outputs', () => {
+      const base = deriveSessionKeys(INPUT)
+      const bound = deriveSessionKeys({ ...INPUT, context: bytes('host-1|ticket-abc') })
+      expect(hex(bound.keyI2R)).not.toBe(hex(base.keyI2R))
+      expect(hex(bound.keyR2I)).not.toBe(hex(base.keyR2I))
+      expect(hex(bound.sessionId)).not.toBe(hex(base.sessionId))
+    })
+
+    it('two different contexts produce different outputs', () => {
+      const a = deriveSessionKeys({ ...INPUT, context: bytes('host-1|ticket-abc') })
+      const b = deriveSessionKeys({ ...INPUT, context: bytes('host-2|ticket-abc') })
+      expect(hex(a.keyI2R)).not.toBe(hex(b.keyI2R))
+      expect(hex(a.keyR2I)).not.toBe(hex(b.keyR2I))
+      expect(hex(a.sessionId)).not.toBe(hex(b.sessionId))
+    })
+
+    it('the same context on both computations agrees', () => {
+      const a = deriveSessionKeys({ ...INPUT, context: bytes('bind-me') })
+      const b = deriveSessionKeys({ ...INPUT, context: bytes('bind-me') })
+      expect(hex(a.keyI2R)).toBe(hex(b.keyI2R))
+      expect(hex(a.keyR2I)).toBe(hex(b.keyR2I))
+      expect(hex(a.sessionId)).toBe(hex(b.sessionId))
+    })
   })
 })

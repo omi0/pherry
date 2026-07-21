@@ -73,6 +73,16 @@ export interface Duplex {
 interface CommonConfig {
   duplex: Duplex
   /**
+   * An optional application-supplied context bound into the key schedule (e.g. a
+   * relay transport's routing identifiers such as `hostId` / ticket). Both peers
+   * must supply identical bytes: peers with mismatched context derive different
+   * keys, so the first inbound record fails to open and the channel fails closed
+   * — {@link SecureChannel.authenticated} rejects. Omitting it (or passing an
+   * empty context) is the default and leaves derivation byte-identical to a
+   * context-free channel.
+   */
+  context?: Uint8Array
+  /**
    * Called with any exception thrown by the {@link SecureChannel.onFrame}
    * handler. The channel stays healthy and keeps delivering later frames; this
    * only surfaces the application-side failure. When omitted, such an error is
@@ -134,8 +144,8 @@ export class SecureChannel {
     this.#onHandlerError = config.onHandlerError
     this.#handshake =
       config.role === 'initiator'
-        ? initiatorHandshake(config.pinnedHostStatic)
-        : responderHandshake(config.staticKey)
+        ? initiatorHandshake(config.pinnedHostStatic, config.context)
+        : responderHandshake(config.staticKey, config.context)
 
     this.#ready = new Promise<void>((resolve, reject) => {
       this.#resolveReady = resolve
