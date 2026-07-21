@@ -83,4 +83,5 @@ is a working, local, end-to-end-encrypted terminal mirror.
 
 **Next: leg 3c** — the real "just type `gemini`" custody UX. Spec: [`docs/leg-3c.md`](./docs/leg-3c.md).
 
-Then: **P2** relay + control plane (→ the phone) · **P3** iOS app + attention plane · **P4** cloud sandboxes.
+Then: **P2** relay + control plane + pairing ([`docs/leg-P2.md`](./docs/leg-P2.md)) · **P3** iOS app +
+attention plane · **P4** cloud sandboxes.

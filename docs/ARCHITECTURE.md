@@ -274,8 +274,8 @@ frame codec, JSON-Schema export. The OSS spec and the foundation everything hang
 ### ⏭ P2 — relay + control plane + pairing → the phone
 The blind director→cell **relay**, the stateless **control plane** (Clerk-backed human auth + host/device
 credentials + tenancy + registry, see §4a), and **`dock`** (Clerk login + QR phone pairing). After P2 a controller reaches a host **over the internet**,
-E2EE, and the phone can be the second viewer of a boarded session. New: `apps/control-plane`,
-`apps/relay`, and `dock`'s cloud half.
+E2EE (provable with a remote CLI controller; the phone *app* is P3). New: `apps/control-plane`,
+`apps/relay`, `packages/relay-core`, and `dock`'s cloud half. Spec: [`leg-P2.md`](./leg-P2.md).
 
 ### ⏭ P3 — iOS controller + the attention plane
 Reuse the proven native CallKit ring; add a SwiftTerm mirror view + tappable approvals. Wire the
