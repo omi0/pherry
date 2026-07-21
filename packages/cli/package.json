@@ -1,0 +1,30 @@
+{
+  "name": "@pherry/cli",
+  "version": "0.1.0",
+  "description": "The Pherry CLI — pherry.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "pherry": "./dist/bin/pherry.js"
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@pherry/channel": "workspace:*",
+    "@pherry/host": "workspace:*",
+    "@pherry/protocol": "workspace:*",
+    "@pherry/sdk": "workspace:*",
+    "@pherry/transport-node": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

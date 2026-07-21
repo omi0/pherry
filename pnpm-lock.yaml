@@ -40,6 +40,37 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@20.19.43)
 
+  packages/cli:
+    dependencies:
+      '@pherry/channel':
+        specifier: workspace:*
+        version: link:../channel
+      '@pherry/host':
+        specifier: workspace:*
+        version: link:../host
+      '@pherry/protocol':
+        specifier: workspace:*
+        version: link:../../protocol
+      '@pherry/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+      '@pherry/transport-node':
+        specifier: workspace:*
+        version: link:../transport-node
+    devDependencies:
+      '@types/node':
+        specifier: ^20.11.0
+        version: 20.19.43
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@20.19.43)
+
   packages/host:
     dependencies:
       '@pherry/channel':
@@ -83,6 +114,25 @@ importers:
       '@pherry/host':
         specifier: workspace:*
         version: link:../host
+      '@types/node':
+        specifier: ^20.11.0
+        version: 20.19.43
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@20.19.43)
+
+  packages/transport-node:
+    dependencies:
+      '@pherry/channel':
+        specifier: workspace:*
+        version: link:../channel
+    devDependencies:
       '@types/node':
         specifier: ^20.11.0
         version: 20.19.43
