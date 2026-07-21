@@ -17,7 +17,7 @@
  * This is the same mechanism whether the session was born from `pherry run`, from
  * a hand-launched terminal adopted under custody, or in a cloud sandbox.
  */
-import { PtyOpcode, encodePtyFrame } from '@pherry/protocol'
+import { PtyOpcode, encodeExitPayload, encodePtyFrame, encodeSizePayload } from '@pherry/protocol'
 import type { SessionRef } from '@pherry/protocol'
 import type { Backend, BackendHandle, Disposable } from '../backend/backend.js'
 import { Mirror } from './mirror.js'
@@ -57,20 +57,6 @@ export interface SessionOptions {
    * Default {@link DEFAULT_STREAM_ID}.
    */
   streamId?: number
-}
-
-const encodeSize = (cols: number, rows: number): Uint8Array => {
-  const out = new Uint8Array(4)
-  new DataView(out.buffer).setUint16(0, cols, true)
-  new DataView(out.buffer).setUint16(2, rows, true)
-  return out
-}
-
-const encodeExit = (code: number | null): Uint8Array => {
-  if (code === null) return new Uint8Array(0)
-  const out = new Uint8Array(4)
-  new DataView(out.buffer).setInt32(0, code, true)
-  return out
 }
 
 export class Session {
@@ -171,7 +157,7 @@ export class Session {
     // Emitting the snapshot and registering the sink happen with no `await`
     // between them, so no live frame can interleave or be missed.
     this.#emitSnapshot(sink)
-    if (this.#ended) this.#emitTo(sink, PtyOpcode.Ended, encodeExit(null), this.#endedSeq)
+    if (this.#ended) this.#emitTo(sink, PtyOpcode.Ended, encodeExitPayload(null), this.#endedSeq)
 
     this.#subscribers.add(sink)
     return () => void this.#subscribers.delete(sink)
@@ -196,7 +182,7 @@ export class Session {
     this.#rows = rows
     this.#backend.resize(this.#handle, cols, rows)
     this.#mirror.resize(cols, rows)
-    this.#broadcast(PtyOpcode.Resized, encodeSize(cols, rows))
+    this.#broadcast(PtyOpcode.Resized, encodeSizePayload({ cols, rows }))
   }
 
   /**
@@ -226,7 +212,7 @@ export class Session {
 
   #onExit(code: number | null): void {
     if (this.#ended || this.#disposed) return
-    this.#endedSeq = this.#broadcast(PtyOpcode.Ended, encodeExit(code))
+    this.#endedSeq = this.#broadcast(PtyOpcode.Ended, encodeExitPayload(code))
     this.#ended = true
     this.#subscribers.clear()
     this.#backendOutputSub.dispose()
@@ -251,7 +237,12 @@ export class Session {
   /** Send `sink` a point-in-time snapshot stamped with the current live seq. */
   #emitSnapshot(sink: SessionSink): void {
     const at = this.#seq
-    this.#emitTo(sink, PtyOpcode.SnapshotStart, encodeSize(this.#cols, this.#rows), at)
+    this.#emitTo(
+      sink,
+      PtyOpcode.SnapshotStart,
+      encodeSizePayload({ cols: this.#cols, rows: this.#rows }),
+      at,
+    )
     const body = new TextEncoder().encode(this.#mirror.serialize())
     for (let offset = 0; offset < body.length; offset += SNAPSHOT_CHUNK_BYTES) {
       this.#emitTo(

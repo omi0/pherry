@@ -84,3 +84,11 @@ export {
   encodePtyFrame,
 } from './pty-frame.js'
 export type { PtyFrame } from './pty-frame.js'
+
+// PTY frame payloads
+export {
+  decodeExitPayload,
+  decodeSizePayload,
+  encodeExitPayload,
+  encodeSizePayload,
+} from './pty-payloads.js'

@@ -1,7 +1,7 @@
 {
-  "name": "@pherry/host",
+  "name": "@pherry/sdk",
   "version": "0.1.0",
-  "description": "The Pherry host — owns agent sessions under PTY custody and mirrors them over the wire.",
+  "description": "The Pherry controller client — connect to a host over the secure channel and steer a session.",
   "license": "MIT",
   "type": "module",
   "sideEffects": false,
@@ -22,12 +22,10 @@
   },
   "dependencies": {
     "@pherry/channel": "workspace:*",
-    "@pherry/protocol": "workspace:*",
-    "@xterm/addon-serialize": "^0.13.0",
-    "@xterm/headless": "^5.5.0",
-    "node-pty": "^1.0.0"
+    "@pherry/protocol": "workspace:*"
   },
   "devDependencies": {
+    "@pherry/host": "workspace:*",
     "@types/node": "^20.11.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",

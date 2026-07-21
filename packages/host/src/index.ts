@@ -35,6 +35,10 @@ export { SessionRegistry } from './session/registry.js'
 export { openSession, spawnSession } from './session/spawn.js'
 export type { OpenSessionOptions } from './session/spawn.js'
 
+// Serving a connection over a secure channel
+export { serveConnection } from './serve/serve-connection.js'
+export type { ServeConnectionOptions, ServedConnection } from './serve/serve-connection.js'
+
 // Custody
 export { CustodyDesk, CustodyError } from './custody/open.js'
 export type { CustodyDeskOptions, CustodyErrorCode, Reservation } from './custody/open.js'
