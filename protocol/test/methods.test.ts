@@ -84,4 +84,35 @@ describe('METHODS registry', () => {
       METHODS['attention.raise'].params.safeParse({ sessionRef: sref, kind: 'blocked' }).success,
     ).toBe(false)
   })
+
+  it('custody.reserve: custody spec in, reservation out', () => {
+    expect(
+      METHODS['custody.reserve'].params.safeParse({
+        argv: ['claude'],
+        cwd: '/repo',
+        env: {},
+        cols: 80,
+        rows: 24,
+      }).success,
+    ).toBe(true)
+    expect(
+      METHODS['custody.reserve'].result.safeParse({ sessionRef: sref, expiresAt: 1_000 }).success,
+    ).toBe(true)
+    expect(
+      METHODS['custody.reserve'].params.safeParse({ cwd: '/repo', env: {}, cols: 80, rows: 24 })
+        .success,
+    ).toBe(false)
+  })
+
+  it('custody.claim: session ref in, Ack out', () => {
+    expect(METHODS['custody.claim'].params.safeParse({ sessionRef: sref }).success).toBe(true)
+    expect(METHODS['custody.claim'].result.safeParse({ ok: true }).success).toBe(true)
+    expect(METHODS['custody.claim'].params.safeParse({}).success).toBe(false)
+  })
+
+  it('sessions.list: empty params in, session list out', () => {
+    expect(METHODS['sessions.list'].params.safeParse({}).success).toBe(true)
+    expect(METHODS['sessions.list'].result.safeParse({ sessions: [] }).success).toBe(true)
+    expect(METHODS['sessions.list'].result.safeParse({}).success).toBe(false)
+  })
 })

@@ -52,6 +52,15 @@ export { SandboxSpec, SpawnResult } from './schemas/sandbox.js'
 // Attention
 export { AttentionEvent } from './schemas/attention.js'
 
+// Custody
+export {
+  CustodyClaim,
+  CustodyReservation,
+  CustodySpec,
+  SessionInfo,
+  SessionList,
+} from './schemas/custody.js'
+
 // Handshake
 export { Hello, HelloAck, Role, negotiateHello } from './handshake.js'
 export type { HandshakeOutcome } from './handshake.js'

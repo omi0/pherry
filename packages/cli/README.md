@@ -4,16 +4,55 @@ The CLI wires the Pherry packages into runnable commands, and exports the
 reusable **local-terminal client engine** that the end-user surface builds on.
 
 > [!IMPORTANT]
-> `run` / `attach` are **development** commands — a local harness for testing the
-> mirror path end to end. They are **not** how people use Pherry. The end-user
-> surface (leg 3c) is **`dock`** + **`board`**: you run those once, then just type
-> `gemini` / `claude` in a followed repo and the agent's TUI opens already
-> mirrored to your phone. `run` / `attach` exist so that same mirror path can be
-> exercised from two shells on one machine, with no relay and no shims.
+> The end-user surface is **`dock`** + **`board`**: you run those once, then just
+> type `gemini` / `claude` in a boarded repo and the agent's TUI opens already
+> host-owned and mirrorable. `serve` / `run` / `attach` / `open` are **development
+> & internal** tooling — the always-on daemon, a single-session spawn-and-serve, a
+> terminal client, and the shim target — so that same custody + mirror path can be
+> exercised on one machine, with no relay and no phone.
+
+## The custody flow (leg 3c)
+
+```bash
+# One-time: ensure the host identity + local config, and start the daemon.
+pherry dock
+
+# In a repo: install PATH shims so its agents launch under host custody.
+pherry board
+
+# Now just type your agent. A shim intercepts it, the daemon takes custody, and
+# the TUI opens in this terminal — normally — while it is a host-owned session.
+gemini
+
+# From another shell: a SECOND viewer of that same session (multi-viewer custody).
+pherry attach
+
+# List the daemon's live sessions.
+pherry sessions
+
+# Soft brake: stop custodying NEW launches in this repo (existing ones stay
+# visible/steerable). Revert by boarding again.
+pherry anchor
+
+# Hard revert: remove the shims/custody entirely.
+pherry unboard
+```
+
+`board` writes one POSIX-`sh` shim per known agent to `~/.pherry/shims`, whose
+fail-open ladder hands an interactive launch inside a boarded, un-anchored repo to
+`pherry open <agent> --exec-fallback <realbin> -- "$@"` — the internal shim target,
+which reserves + claims a session on the daemon and renders it here. If anything
+about custody is off (no daemon, a rejected claim, …) the shim / `open` execs the
+real binary unchanged, so a launch can never break.
 
 ## Development commands
 
 ```bash
+# The persistent custody daemon (what the shims talk to). Runs in the foreground;
+# `--stop` tears down a backgrounded one.
+pherry serve
+pherry serve --stop
+
 # Shell A — spawn an agent (or any executable) and serve its mirror over a
 # per-session unix socket under ~/.pherry/run/.
 pherry run bash
@@ -21,9 +60,11 @@ pherry run bash
 #   pherry: socket /Users/you/.pherry/run/sref_….sock
 #   pherry: attach from another shell with `pherry attach`
 
-# Shell B — mirror that session into this terminal (defaults to the most recent).
+# Shell B — mirror a session into this terminal. With no flag it prefers the
+# daemon's latest session, else the most-recent run socket.
 pherry attach
-pherry attach --socket ~/.pherry/run/sref_….sock
+pherry attach --socket ~/.pherry/run/sref_….sock   # a specific run socket
+pherry attach --session sref_…                      # a specific daemon session
 ```
 
 A known agent id (`claude`, `codex`, `gemini`, `opencode`) is launched through

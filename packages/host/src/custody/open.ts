@@ -95,8 +95,18 @@ export class CustodyDesk {
    * Claim a reservation: spawn the reserved spec on `backend` under custody and
    * register the resulting session. Rejects with a {@link CustodyError} if the
    * reservation is unknown, already claimed, or expired.
+   *
+   * Per-claim `options` are merged **over** the desk-level defaults and forwarded
+   * to {@link openSession}, so a long-lived daemon can stamp each claimed session
+   * with its own tunables — most importantly a unique `streamId`, since the
+   * Controller keys inbound PTY streams by it and every session otherwise defaults
+   * to `DEFAULT_STREAM_ID`.
    */
-  async claimOpenSession(ref: SessionRef, backend: Backend): Promise<Session> {
+  async claimOpenSession(
+    ref: SessionRef,
+    backend: Backend,
+    options?: OpenSessionOptions,
+  ): Promise<Session> {
     const record = this.#reservations.get(ref)
     if (!record) throw new CustodyError('not-found', `no reservation for ${ref}`)
     if (record.claimed) throw new CustodyError('already-claimed', `${ref} was already claimed`)
@@ -108,7 +118,8 @@ export class CustodyDesk {
     // Mark claimed before the async spawn so a concurrent claim loses the race.
     record.claimed = true
     try {
-      return await openSession(ref, record.spec, backend, this.#registry, this.#sessionOptions)
+      const merged = { ...this.#sessionOptions, ...options }
+      return await openSession(ref, record.spec, backend, this.#registry, merged)
     } catch (error) {
       // The spawn failed: let the reservation be retried within its TTL.
       record.claimed = false

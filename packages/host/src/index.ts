@@ -37,7 +37,11 @@ export type { OpenSessionOptions } from './session/spawn.js'
 
 // Serving a connection over a secure channel
 export { serveConnection } from './serve/serve-connection.js'
-export type { ServeConnectionOptions, ServedConnection } from './serve/serve-connection.js'
+export type {
+  CustodyHooks,
+  ServeConnectionOptions,
+  ServedConnection,
+} from './serve/serve-connection.js'
 
 // Custody
 export { CustodyDesk, CustodyError } from './custody/open.js'

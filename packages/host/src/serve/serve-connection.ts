@@ -16,6 +16,10 @@
  *    before the snapshot frames arrive.
  *  - `session.input` / `session.resize` drive the session and reply `Ack`.
  *  - `session.unsubscribe` tears the subscription down and replies `Ack`.
+ *  - `custody.reserve` / `custody.claim` / `sessions.list` are served only when
+ *    the matching {@link ServeConnectionOptions} hook is injected; otherwise they
+ *    reply `METHOD_NOT_FOUND` like any unsupported method. `custody.claim` is
+ *    async, and its rejections are mapped to coded failures (never left dangling).
  *  - an unknown method replies `METHOD_NOT_FOUND`; a missing session replies
  *    `NOT_FOUND`; malformed params reply `INVALID_ARGUMENT`.
  *
@@ -30,6 +34,7 @@ import {
   METHODS,
   type MethodName,
   type ParamsOf,
+  type ResultOf,
   type RpcError,
   RpcRequest,
   type RpcSuccess,
@@ -37,6 +42,7 @@ import {
   failure,
   success,
 } from '@pherry/protocol'
+import { CustodyError } from '../custody/open.js'
 import type { SessionRegistry } from '../session/registry.js'
 
 const encoder = new TextEncoder()
@@ -48,6 +54,21 @@ interface Subscription {
   readonly unsubscribe: () => void
 }
 
+/**
+ * Injected custody operations that back the `custody.reserve` / `custody.claim`
+ * methods. A daemon supplies these (wired to its {@link CustodyDesk}); a plain
+ * mirror server leaves them off, and the two custody methods then answer
+ * `METHOD_NOT_FOUND`. A rejection whose cause is a {@link CustodyError} is mapped
+ * to a coded failure (`not-found` / `expired` -> `NOT_FOUND`, `already-claimed`
+ * -> `FORBIDDEN`); anything else is an `INTERNAL` error routed through `onError`.
+ */
+export interface CustodyHooks {
+  /** Reserve a session for a launch about to happen; returns the receipt to claim. */
+  reserve(spec: ParamsOf<'custody.reserve'>): ResultOf<'custody.reserve'>
+  /** Claim a prior reservation, spawning the agent under custody. */
+  claim(sessionRef: SessionRef): Promise<void>
+}
+
 /** Optional hooks for a served connection. */
 export interface ServeConnectionOptions {
   /**
@@ -57,6 +78,17 @@ export interface ServeConnectionOptions {
    * `RpcError` replies.
    */
   onError?: (error: Error) => void
+  /**
+   * Custody operations. When present, `custody.reserve` / `custody.claim` are
+   * served; when absent they answer `METHOD_NOT_FOUND` like any other unsupported
+   * method.
+   */
+  custody?: CustodyHooks
+  /**
+   * List the host's live sessions. When present, `sessions.list` is served with
+   * whatever this returns; when absent it answers `METHOD_NOT_FOUND`.
+   */
+  listSessions?: () => ResultOf<'sessions.list'>['sessions']
 }
 
 /** Handle to a served connection: introspect its subscriptions and tear it down. */
@@ -145,6 +177,52 @@ export function serveConnection(
     send(success(id, { ok: true }))
   }
 
+  /** Map a {@link CustodyError} to a coded failure, or `undefined` if unmapped. */
+  const custodyFailure = (id: string, error: unknown): RpcError | undefined => {
+    if (!(error instanceof CustodyError)) return undefined
+    const code = error.code === 'already-claimed' ? ErrorCode.Forbidden : ErrorCode.NotFound
+    return failure(id, code, error.message)
+  }
+
+  const handleReserve = (
+    id: string,
+    params: ParamsOf<'custody.reserve'>,
+    custody: CustodyHooks,
+  ): void => {
+    let reservation: ResultOf<'custody.reserve'>
+    try {
+      reservation = custody.reserve(params)
+    } catch (error) {
+      const mapped = custodyFailure(id, error)
+      // A non-custody throw bubbles to the dispatch catch -> onError + INTERNAL.
+      if (!mapped) throw error
+      send(mapped)
+      return
+    }
+    send(success(id, reservation))
+  }
+
+  // Async: self-contained error handling, so the fire-and-forget call in
+  // `dispatch` can never leave an unhandled rejection.
+  const handleClaim = async (
+    id: string,
+    sessionRef: SessionRef,
+    custody: CustodyHooks,
+  ): Promise<void> => {
+    try {
+      await custody.claim(sessionRef)
+      send(success(id, { ok: true }))
+    } catch (error) {
+      const mapped = custodyFailure(id, error)
+      if (mapped) {
+        send(mapped)
+        return
+      }
+      options.onError?.(asError(error))
+      send(failure(id, ErrorCode.Internal, 'internal error handling request'))
+    }
+  }
+
   const dispatch = (request: RpcRequest): void => {
     const method = request.method
     if (!isMethod(method)) {
@@ -168,6 +246,31 @@ export function serveConnection(
         return
       case 'session.unsubscribe':
         handleUnsubscribe(request.id, parsed.data as ParamsOf<'session.unsubscribe'>)
+        return
+      case 'custody.reserve':
+        if (!options.custody) {
+          send(failure(request.id, ErrorCode.MethodNotFound, `unsupported method: ${method}`))
+          return
+        }
+        handleReserve(request.id, parsed.data as ParamsOf<'custody.reserve'>, options.custody)
+        return
+      case 'custody.claim':
+        if (!options.custody) {
+          send(failure(request.id, ErrorCode.MethodNotFound, `unsupported method: ${method}`))
+          return
+        }
+        void handleClaim(
+          request.id,
+          (parsed.data as ParamsOf<'custody.claim'>).sessionRef,
+          options.custody,
+        )
+        return
+      case 'sessions.list':
+        if (!options.listSessions) {
+          send(failure(request.id, ErrorCode.MethodNotFound, `unsupported method: ${method}`))
+          return
+        }
+        send(success(request.id, { sessions: options.listSessions() }))
         return
       default:
         // A valid method this host leg does not serve (approve / sandbox / attention).

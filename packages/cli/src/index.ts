@@ -32,3 +32,44 @@ export { resolveAgentArgv, startRun } from './commands/run.js'
 export type { RunHandle, RunOptions } from './commands/run.js'
 export { runAttach } from './commands/attach.js'
 export type { AttachOptions } from './commands/attach.js'
+
+// Custody (leg 3c): the daemon/shim filesystem layout, the PATH shim template,
+// the boarded/anchored registries, and the board/unboard/anchor commands.
+export {
+  anchoredListPath,
+  boardedListPath,
+  configPath,
+  hostPidPath,
+  hostSocketPath,
+  shimsDir,
+} from './paths.js'
+export { renderShimScript } from './custody/shim.js'
+export type { ShimScriptOptions } from './custody/shim.js'
+export {
+  addToAnchoredList,
+  addToBoardedList,
+  readAnchoredList,
+  readBoardedList,
+  removeFromAnchoredList,
+  removeFromBoardedList,
+} from './custody/boarded.js'
+export { runAnchor, runBoard, runUnboard } from './commands/board.js'
+export type {
+  AnchorOptions,
+  AnchorResult,
+  BoardOptions,
+  BoardResult,
+  UnboardOptions,
+  UnboardResult,
+} from './commands/board.js'
+
+// The custody daemon (leg 3c): the always-on host the shims talk to, plus the
+// `open` / `sessions` / `dock` commands built on top of it.
+export { startServe, stopServe } from './commands/serve.js'
+export type { ServeOptions, ServeHandle, StopResult } from './commands/serve.js'
+export { runOpen } from './commands/open.js'
+export type { ExecFallbackRunner, OpenOptions, OpenResult } from './commands/open.js'
+export { runSessions } from './commands/sessions.js'
+export type { SessionsOptions } from './commands/sessions.js'
+export { runDock } from './commands/dock.js'
+export type { DockDaemonState, DockOptions, DockResult } from './commands/dock.js'

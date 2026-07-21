@@ -78,6 +78,32 @@ describe('CustodyDesk reserve -> claim', () => {
     const desk = new CustodyDesk({ registry: new SessionRegistry() })
     expect(() => desk.reserveOpenSession(spec, 0)).toThrow()
   })
+
+  it('stamps each claimed session with its per-claim streamId (override desk defaults)', async () => {
+    const registry = new SessionRegistry()
+    // Desk default would be streamId 1; each per-claim option must win over it.
+    const desk = new CustodyDesk({ registry, sessionOptions: { streamId: 1 } })
+    const backend = new FakeBackend()
+
+    const first = desk.reserveOpenSession(spec, 60_000)
+    const second = desk.reserveOpenSession(spec, 60_000)
+    const sessionA = await desk.claimOpenSession(first.ref, backend, { streamId: 7 })
+    const sessionB = await desk.claimOpenSession(second.ref, backend, { streamId: 8 })
+
+    expect(sessionA.streamId).toBe(7)
+    expect(sessionB.streamId).toBe(8)
+  })
+
+  it('falls back to desk-level defaults when a claim supplies no options', async () => {
+    const registry = new SessionRegistry()
+    const desk = new CustodyDesk({ registry, sessionOptions: { streamId: 42 } })
+    const backend = new FakeBackend()
+
+    const { ref } = desk.reserveOpenSession(spec, 60_000)
+    const session = await desk.claimOpenSession(ref, backend)
+
+    expect(session.streamId).toBe(42)
+  })
 })
 
 describe('direct spawn path', () => {

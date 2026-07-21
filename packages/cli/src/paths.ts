@@ -34,6 +34,40 @@ export function sessionRefFromSocket(socketPath: string): SessionRef {
 }
 
 /**
+ * The persistent custody daemon's stable socket, `<baseDir>/host.sock`. Unlike
+ * the per-session `run/` sockets above, this one name is fixed: the shims and
+ * `pherry open` always know where to reach the always-on host.
+ */
+export function hostSocketPath(baseDir: string = defaultHostKeyDir()): string {
+  return join(baseDir, 'host.sock')
+}
+
+/** The custody daemon's pid / singleton-lock file, `<baseDir>/host.pid`. */
+export function hostPidPath(baseDir: string = defaultHostKeyDir()): string {
+  return join(baseDir, 'host.pid')
+}
+
+/** The local Pherry config file, `<baseDir>/config.json` (written by `pherry dock`). */
+export function configPath(baseDir: string = defaultHostKeyDir()): string {
+  return join(baseDir, 'config.json')
+}
+
+/** The directory of generated PATH shims, `<baseDir>/shims` (one file per agent). */
+export function shimsDir(baseDir: string = defaultHostKeyDir()): string {
+  return join(baseDir, 'shims')
+}
+
+/** The newline-delimited list of boarded repo realpaths, `<baseDir>/boarded.list`. */
+export function boardedListPath(baseDir: string = defaultHostKeyDir()): string {
+  return join(baseDir, 'boarded.list')
+}
+
+/** The newline-delimited list of anchored repo realpaths, `<baseDir>/anchored.list`. */
+export function anchoredListPath(baseDir: string = defaultHostKeyDir()): string {
+  return join(baseDir, 'anchored.list')
+}
+
+/**
  * The most recently modified run socket under `baseDir`, or `null` if there is
  * none. Used by `pherry attach` when no `--socket` is given.
  */

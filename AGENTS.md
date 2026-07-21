@@ -77,11 +77,11 @@ Open packages must have **no import edge into `apps/`**. `apps/` may depend on t
 
 ## Status (as of the last commit)
 
-**Done, green, pushed** — 6 packages, 192 tests: `protocol` (78) · `host` (50) · `channel` (45,
-audited) · `sdk` (5) · `transport-node` (6) · `cli` (8). `pherry run <agent>` + `pherry attach`
-is a working, local, end-to-end-encrypted terminal mirror.
+**Done, green, pushed** — 6 packages, 257 tests: `protocol` (97) · `host` (59) · `channel` (45,
+audited) · `sdk` (5) · `transport-node` (6) · `cli` (45). Leg 3c is complete: `pherry board` a
+repo, then typing `gemini` (or `claude`/`codex`/…) is intercepted by a PATH shim → the persistent
+`pherry serve` daemon takes custody → the agent's TUI opens in your terminal while a second viewer
+(`pherry attach`) mirrors the same host-owned session — the full local, E2EE, multi-viewer custody flow.
 
-**Next: leg 3c** — the real "just type `gemini`" custody UX. Spec: [`docs/leg-3c.md`](./docs/leg-3c.md).
-
-Then: **P2** relay + control plane + pairing ([`docs/leg-P2.md`](./docs/leg-P2.md)) · **P3** iOS app +
+**Next: P2** relay + control plane + pairing ([`docs/leg-P2.md`](./docs/leg-P2.md)) · **P3** iOS app +
 attention plane · **P4** cloud sandboxes.

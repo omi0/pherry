@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { AttentionEvent } from './schemas/attention.js'
+import { CustodyClaim, CustodyReservation, CustodySpec, SessionList } from './schemas/custody.js'
 import { SessionRef, StreamId } from './schemas/ids.js'
 import { MirrorStreamAck } from './schemas/mirror.js'
 import { SandboxSpec, SpawnResult } from './schemas/sandbox.js'
@@ -47,6 +48,9 @@ export const METHODS = {
   'session.approve': defineMethod('session.approve', ApprovalReply, Ack),
   'sandbox.spawn': defineMethod('sandbox.spawn', SandboxSpec, SpawnResult),
   'attention.raise': defineMethod('attention.raise', AttentionEvent, Ack),
+  'custody.reserve': defineMethod('custody.reserve', CustodySpec, CustodyReservation),
+  'custody.claim': defineMethod('custody.claim', CustodyClaim, Ack),
+  'sessions.list': defineMethod('sessions.list', z.object({}), SessionList),
 } as const
 
 /** Every valid method name. */
