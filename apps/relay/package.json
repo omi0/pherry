@@ -1,0 +1,32 @@
+{
+  "name": "@pherry/relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Pherry relay — a thin deployable that runs @pherry/relay-core's blind cell with the control-plane HTTP authorizer. Proprietary.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@pherry/channel": "workspace:*",
+    "@pherry/relay-core": "workspace:*",
+    "@pherry/transport-node": "workspace:*",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.2.14",
+    "@pherry/control-plane": "workspace:*",
+    "@pherry/host": "workspace:*",
+    "@pherry/protocol": "workspace:*",
+    "@pherry/sdk": "workspace:*",
+    "@types/node": "^20.11.0",
+    "drizzle-orm": "^0.38.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

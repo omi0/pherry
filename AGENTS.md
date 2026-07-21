@@ -52,7 +52,8 @@ Full design + roadmap: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) (visual 
 | `packages/sdk/` | the `Controller` client | open |
 | `packages/transport-node/` | node-socket `Duplex` + unix listen/connect | open |
 | `packages/cli/` | the `pherry` CLI + the reusable **`runTerminalClient`** engine | open |
-| `apps/*` | control-plane · sandbox-orchestrator · voice-worker (Python) · dashboard | proprietary (not built yet) |
+| `apps/control-plane/` | the router: auth · tenancy · pairing · relay coordination — Fastify + Drizzle/Postgres + Redis | proprietary |
+| `apps/relay/` | the deployable blind cell: `relay-core` + the control-plane authorizer | proprietary |
 
 Open packages must have **no import edge into `apps/`**. `apps/` may depend on the open packages.
 
@@ -78,12 +79,12 @@ Open packages must have **no import edge into `apps/`**. `apps/` may depend on t
 
 ## Status (as of the last commit)
 
-**Done, green, pushed** — 7 packages, 325 tests: `protocol` (97) · `host` (59) · `channel` (71,
-audited) · `relay-core` (42) · `sdk` (5) · `transport-node` (6) · `cli` (45). Leg 3c gave the full
-local, E2EE, multi-viewer custody flow: `pherry board` a repo, then typing `gemini` (or
-`claude`/`codex`/…) is intercepted by a PATH shim → the persistent `pherry serve` daemon takes
-custody → the agent's TUI opens in your terminal while a second viewer (`pherry attach`) mirrors the
-same host-owned session.
+**Done, green, pushed** — 9 workspace projects, 463 tests: `protocol` (97) · `host` (59) · `channel`
+(71, audited) · `relay-core` (42) · `sdk` (5) · `transport-node` (6) · `cli` (45) · `control-plane`
+(130) · `relay` (8). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
+repo, then typing `gemini` (or `claude`/`codex`/…) is intercepted by a PATH shim → the persistent
+`pherry serve` daemon takes custody → the agent's TUI opens in your terminal while a second viewer
+(`pherry attach`) mirrors the same host-owned session.
 
 **Leg P2a is done:** `@pherry/relay-core` is the open, blind director→cell rendezvous — the outer
 coordination protocol, a DH host proof (possession of the channel static key), the injected
@@ -92,5 +93,13 @@ authorizer seam, a reference cell, and host/controller transport adapters that e
 relay-bridged connection with routing identifiers bound into the channel context (a mis-splice fails
 closed).
 
-**Next: P2b** `apps/control-plane` + `apps/relay` (proprietary) ([`docs/leg-P2.md`](./docs/leg-P2.md))
-· **P2c** `dock` + host dial-out · **P3** iOS app + attention plane · **P4** cloud sandboxes.
+**Leg P2b is done:** the control plane authenticates humans/hosts/devices, pairs phones, and issues
+the one-time relay tickets the blind cells consume. `apps/control-plane` is the stateless router
+(Fastify + Drizzle/Postgres + Redis, with Clerk behind an injected `IdentityProvider`); `apps/relay`
+is the thin deployable that runs `relay-core`'s blind cell with its `authorizer` wired to the control
+plane's internal HTTP API (which resolves + atomically consumes a ticket via Redis `GETDEL`, so a
+ticket is one-time **globally**, across every cell). An in-process integration test proves the full
+API→relay flow — a paired device gets a ticket, reaches its host through the cell, and runs a live
+E2EE session — plus global one-time-use across two cells and impostor-host rejection.
+
+**Next: P2c** `dock` + host dial-out · **P3** iOS app + attention plane · **P4** cloud sandboxes.

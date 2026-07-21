@@ -240,6 +240,7 @@ so the open host talks the same wire to our hosted control plane *or* a self-hos
 | `packages/transport-node/` | node-socket transport | open |
 | `packages/cli/` | the `pherry` CLI + `runTerminalClient` engine | open |
 | `apps/control-plane/` | router · auth · tenancy · attention | proprietary |
+| `apps/relay/` | the deployable blind cell: `relay-core` + the control-plane authorizer | proprietary |
 | `apps/sandbox-orchestrator/` | the cloud host fleet | proprietary |
 | `apps/voice-worker/` | the LiveKit voice channel (Python) | proprietary |
 | `apps/dashboard/` | web console | proprietary |
