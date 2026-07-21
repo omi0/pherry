@@ -1,0 +1,45 @@
+# Local dev backing services for the Pherry control plane — Postgres + Redis only.
+#
+# This is DEV-ONLY. In production the control plane and relay run from their images
+# (see apps/*/Dockerfile) against MANAGED Postgres and Redis — never these
+# containers. The two apps are NOT defined here: in dev you run them on the host
+# (see docs/running-locally.md) pointed at the ports below.
+#
+#   docker compose up -d        # start postgres + redis
+#   docker compose down         # stop them (add -v to also drop the volumes)
+#
+# Ports are shifted off the defaults where a native install commonly squats:
+# Postgres is published on host 5433 (→ container 5432); Redis on 6379.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: pherry
+      POSTGRES_USER: pherry
+      POSTGRES_PASSWORD: pherry
+    ports:
+      - '5433:5432'
+    volumes:
+      - pherry-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U pherry -d pherry']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - '6379:6379'
+    volumes:
+      - pherry-redis:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pherry-postgres:
+  pherry-redis:

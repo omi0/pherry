@@ -1,0 +1,32 @@
+# Keep the build context small and reproducible. The image build stage installs
+# from the committed lockfile and compiles from source, so no host artefacts are
+# ever copied in. Everything below is either rebuilt in-image or irrelevant.
+
+# Installed / built artefacts — always regenerated in the build stage.
+**/node_modules
+**/dist
+**/coverage
+**/*.tsbuildinfo
+
+# Generated protocol schema (rebuilt by @pherry/protocol's build).
+protocol/schema
+
+# VCS + local tooling.
+.git
+.gitignore
+.github
+
+# Secrets and local env — never bake into an image (`.env.example` is fine but unused).
+**/.env
+**/.env.*
+
+# Logs, OS cruft, scratch.
+**/*.log
+**/.DS_Store
+tmp
+scratch
+scratchpad
+
+# Docker + docs are not needed inside the build context.
+**/Dockerfile
+.dockerignore

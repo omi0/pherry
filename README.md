@@ -50,6 +50,9 @@ pnpm test           # run every package's tests
 pnpm check          # lint + format check (Biome)
 ```
 
+Run the cloud half end-to-end on your machine: [`docs/running-locally.md`](./docs/running-locally.md).
+Take it to production: [`docs/deploying.md`](./docs/deploying.md).
+
 ## Status
 
 Early. `protocol/` is landing first — it's the spine everything else hangs off, and the
