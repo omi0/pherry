@@ -6,18 +6,19 @@
  */
 import { PGlite } from '@electric-sql/pglite'
 import { encodeKey, generateKeyPair } from '@pherry/channel'
-import { newDeviceId, newHostId } from '@pherry/protocol'
+import { newDeviceId, newHostId, newSessionRef } from '@pherry/protocol'
 import { drizzle } from 'drizzle-orm/pglite'
 import type { FastifyInstance } from 'fastify'
 import { type Config, loadConfig } from '../src/config.js'
 import type { Db } from '../src/db/client.js'
 import { migrateDb } from '../src/db/migrate.js'
 import * as schema from '../src/db/schema.js'
-import type { Device, Host, Org, User } from '../src/db/schema.js'
+import type { Device, Host, Org, SessionRow, User } from '../src/db/schema.js'
 import { FakeIdentityProvider } from '../src/identity.js'
-import { newOrgId, newUserId } from '../src/ids.js'
+import { newOrgId, newSessionRowId, newUserId } from '../src/ids.js'
 import { MemoryRedis } from '../src/redis.js'
 import { buildServer } from '../src/server.js'
+import type { AttentionChannel } from '../src/services/attention-channels.js'
 import { mintSecret } from '../src/services/auth.js'
 
 /** A fixed epoch-millisecond clock for deterministic TTL tests. */
@@ -59,6 +60,7 @@ export interface TestApp {
 export async function makeTestApp(
   humanTokens?: Map<string, string>,
   env?: Record<string, string | undefined>,
+  attentionChannels?: AttentionChannel[],
 ): Promise<TestApp> {
   const db = await makeTestDb()
   let current = TEST_NOW
@@ -66,7 +68,14 @@ export async function makeTestApp(
   const redis = new MemoryRedis(now)
   const identity = new FakeIdentityProvider(humanTokens ?? new Map())
   const config = loadConfig(env ?? {})
-  const app = buildServer({ db, redis, identity, config, now })
+  const app = buildServer({
+    db,
+    redis,
+    identity,
+    config,
+    now,
+    ...(attentionChannels !== undefined ? { attentionChannels } : {}),
+  })
   await app.ready()
   return {
     app,
@@ -104,8 +113,11 @@ export interface SeededWorld extends TestApp {
  * one user (bearer {@link HUMAN_TOKEN}), one host, and one device — the common
  * fixture every route test starts from.
  */
-export async function seedWorld(env?: Record<string, string | undefined>): Promise<SeededWorld> {
-  const app = await makeTestApp(new Map([[HUMAN_TOKEN, CLERK_USER]]), env)
+export async function seedWorld(
+  env?: Record<string, string | undefined>,
+  attentionChannels?: AttentionChannel[],
+): Promise<SeededWorld> {
+  const app = await makeTestApp(new Map([[HUMAN_TOKEN, CLERK_USER]]), env, attentionChannels)
   const org = await seedOrg(app.db)
   const user = await seedUser(app.db, { orgId: org.id, clerkUserId: CLERK_USER })
   const host = await seedHost(app.db, { orgId: org.id, userId: user.id })
@@ -170,6 +182,29 @@ export async function seedHost(
   const host = rows[0]
   if (host === undefined) throw new Error('seedHost: insert returned no row')
   return { host, token: secret.token }
+}
+
+/**
+ * Insert a `sessions` row for `hostId`/`orgId` (a random `SessionRef` by default) so a
+ * host's raise can bind to it. Returns the row — read `row.sessionRef` to raise against.
+ */
+export async function seedSession(
+  db: Db,
+  opts: { hostId: string; orgId: string; sessionRef?: string; status?: string },
+): Promise<SessionRow> {
+  const rows = await db
+    .insert(schema.sessions)
+    .values({
+      id: newSessionRowId(),
+      hostId: opts.hostId,
+      orgId: opts.orgId,
+      sessionRef: opts.sessionRef ?? newSessionRef(),
+      status: opts.status ?? 'live',
+    })
+    .returning()
+  const session = rows[0]
+  if (session === undefined) throw new Error('seedSession: insert returned no row')
+  return session
 }
 
 /** Insert a device with a freshly minted `dt_` token; returns the row + plaintext token. */

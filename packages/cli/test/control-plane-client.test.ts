@@ -1,3 +1,4 @@
+import { type AttentionEvent, newSessionRef } from '@pherry/protocol'
 import { describe, expect, it } from 'vitest'
 import {
   ControlPlaneClient,
@@ -137,6 +138,89 @@ describe('ControlPlaneClient — request shaping', () => {
     const { client, calls } = makeClient(jsonResponse({ ok: true }), 'https://cp.example.com/')
     await client.heartbeat('hk_secret', {})
     expect(calls[0]?.url).toBe('https://cp.example.com/v1/host/heartbeat')
+  })
+})
+
+describe('ControlPlaneClient — attention', () => {
+  /** A concrete, valid event to raise. */
+  const event: AttentionEvent = {
+    sessionRef: newSessionRef(),
+    kind: 'asks',
+    summary: 'needs a decision',
+    question: 'ship it?',
+    options: ['yes', 'no'],
+    urgency: 'call',
+  }
+
+  it('raiseAttention posts the event to /v1/attention with the host bearer', async () => {
+    const { client, calls } = makeClient(jsonResponse({ ok: true, suppressed: false, id: 'att_1' }))
+    const result = await client.raiseAttention('hk_secret', event)
+    expect(result).toEqual({ ok: true, suppressed: false, id: 'att_1' })
+    expect(calls[0]?.method).toBe('POST')
+    expect(calls[0]?.url).toBe('https://cp.example.com/v1/attention')
+    expect(calls[0]?.headers.authorization).toBe('Bearer hk_secret')
+    expect(calls[0]?.body).toEqual(event)
+  })
+
+  it('raiseAttention passes a coalesced result through (suppressed, no id)', async () => {
+    const { client } = makeClient(jsonResponse({ ok: true, suppressed: true }))
+    const result = await client.raiseAttention('hk_secret', event)
+    expect(result).toEqual({ ok: true, suppressed: true })
+    expect(result.id).toBeUndefined()
+  })
+
+  it('raiseAttention never puts the host credential in the error', async () => {
+    const secret = 'hk_raise_topsecret'
+    const { client } = makeClient(
+      jsonResponse({ error: { code: 'rate-limited', message: 'slow down' } }, 429),
+    )
+    const error = (await client.raiseAttention(secret, event).catch((e) => e)) as ControlPlaneError
+    expect(error.code).toBe('rate-limited')
+    expect(error.message).not.toContain(secret)
+    expect(JSON.stringify(error)).not.toContain(secret)
+  })
+
+  it('listAttention GETs /v1/attention with the bearer and no query by default', async () => {
+    const { client, calls } = makeClient(jsonResponse({ events: [] }))
+    const result = await client.listAttention('dt_device')
+    expect(result).toEqual({ events: [] })
+    expect(calls[0]?.method).toBe('GET')
+    expect(calls[0]?.url).toBe('https://cp.example.com/v1/attention')
+    expect(calls[0]?.headers.authorization).toBe('Bearer dt_device')
+    expect(calls[0]?.body).toBeUndefined()
+  })
+
+  it('listAttention forwards since + waitMs as the since/wait query params', async () => {
+    const { client, calls } = makeClient(jsonResponse({ events: [] }))
+    await client.listAttention('ct_human', { since: 123, waitMs: 5_000 })
+    const url = new URL(calls[0]?.url ?? '')
+    expect(url.pathname).toBe('/v1/attention')
+    expect(url.searchParams.get('since')).toBe('123')
+    expect(url.searchParams.get('wait')).toBe('5000')
+    expect(calls[0]?.headers.authorization).toBe('Bearer ct_human')
+  })
+
+  it('ackAttention posts to /v1/attention/:id/ack with the bearer and no body', async () => {
+    const { client, calls } = makeClient(jsonResponse({ ok: true }))
+    const result = await client.ackAttention('dt_device', 'att_9')
+    expect(result).toEqual({ ok: true })
+    expect(calls[0]?.method).toBe('POST')
+    expect(calls[0]?.url).toBe('https://cp.example.com/v1/attention/att_9/ack')
+    expect(calls[0]?.headers.authorization).toBe('Bearer dt_device')
+    expect(calls[0]?.headers['content-type']).toBeUndefined()
+    expect(calls[0]?.body).toBeUndefined()
+  })
+
+  it('ackAttention surfaces the undifferentiated 404 with its code', async () => {
+    const { client } = makeClient(
+      jsonResponse({ error: { code: 'attention-not-found', message: 'unknown' } }, 404),
+    )
+    const error = (await client.ackAttention('dt_device', 'att_gone').catch((e) => e)) as
+      | ControlPlaneError
+      | undefined
+    expect(error).toBeInstanceOf(ControlPlaneError)
+    expect(error?.code).toBe('attention-not-found')
+    expect(error?.status).toBe(404)
   })
 })
 

@@ -74,6 +74,25 @@ export type { SessionsOptions } from './commands/sessions.js'
 export { runDock } from './commands/dock.js'
 export type { DockDaemonState, DockOptions, DockResult } from './commands/dock.js'
 
+// P3a — host origination of attention events: the `attention` verb's engine
+// (raise / list / watch / ack), pure functions the bin renders and the tests drive.
+export {
+  runAttentionAck,
+  runAttentionList,
+  runAttentionRaise,
+  runAttentionWatch,
+} from './commands/attention.js'
+export type {
+  AttentionAckOptions,
+  AttentionKind,
+  AttentionListOptions,
+  AttentionRaiseOptions,
+  AttentionRaiseResult,
+  AttentionReadOptions,
+  AttentionUrgency,
+  AttentionWatchOptions,
+} from './commands/attention.js'
+
 // P2c — the online surface: the docked-state config, the typed control-plane
 // client, the TCP cell dialer, the terminal QR renderer, and the daemon's
 // reconnecting relay uplink. These are the pieces `dock`, the host dial-out, and
@@ -87,12 +106,14 @@ export {
 } from './dock-config.js'
 export { ControlPlaneClient, ControlPlaneError, resolveApiUrl } from './control-plane-client.js'
 export type {
+  AttentionEventRecord,
   CliAuthStartResult,
   CliAuthExchangeResult,
   ControlPlaneClientOptions,
   CreateHostResult,
   HeartbeatResult,
   MintPairResult,
+  RaiseAttentionResult,
   RelayTicketResult,
   SessionReport,
 } from './control-plane-client.js'

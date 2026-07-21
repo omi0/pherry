@@ -1,9 +1,11 @@
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FakeBackend } from '@pherry/host'
+import { newSessionRef } from '@pherry/protocol'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { connectDaemon } from '../src/daemon/client.js'
+import { writeDockConfig } from '../src/dock-config.js'
 import {
   type ServeHandle,
   hostPidPath,
@@ -181,6 +183,205 @@ describe('stopServe — tearing the daemon down', () => {
     await writeFile(hostPidPath(baseDir), '2147483647\n')
     expect(await stopServe({ baseDir })).toEqual({ running: false })
     expect(await exists(hostPidPath(baseDir))).toBe(false)
+  })
+})
+
+describe('startServe — the attention hook (leg-P3a)', () => {
+  let tmp: string
+  let baseDir: string
+  let handle: ServeHandle | undefined
+
+  beforeEach(async () => {
+    tmp = await mkdtemp(join(tmpdir(), 'ph-'))
+    baseDir = tmp
+    handle = undefined
+  })
+
+  afterEach(async () => {
+    await handle?.close()
+    await rm(tmp, { recursive: true, force: true })
+  })
+
+  /** One recorded control-plane call the hook made through the injected fetch. */
+  interface HookCPCall {
+    path: string
+    token: string | undefined
+    body: unknown
+  }
+
+  /**
+   * A `fetch` double the attention hook raises through: it records every call and
+   * answers a heartbeat with `{ ok }` and a raise with a persisted id (or, when
+   * `raiseStatus` is non-200, the control-plane error envelope).
+   */
+  function hookFetch(calls: HookCPCall[], opts: { raiseStatus?: number } = {}): typeof fetch {
+    const impl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(String(input))
+      const headers = (init?.headers ?? {}) as Record<string, string>
+      calls.push({
+        path: url.pathname,
+        token: headers.authorization?.replace(/^Bearer /, ''),
+        body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+      })
+      const json = (status: number, body: unknown): Response =>
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { 'content-type': 'application/json' },
+        })
+      if (url.pathname === '/v1/host/heartbeat') return json(200, { ok: true })
+      const status = opts.raiseStatus ?? 200
+      if (status !== 200) return json(status, { error: { code: 'rate-limited', message: 'no' } })
+      return json(200, { ok: true, suppressed: false, id: 'att_hook' })
+    }
+    return impl as typeof fetch
+  }
+
+  const hookPath = (): string => join(baseDir, 'attention-hook.json')
+
+  /** Dock the base dir (no director → no relay) and start a daemon with the hook wired. */
+  async function startDocked(
+    opts: { raiseStatus?: number } = {},
+  ): Promise<{ port: number; calls: HookCPCall[] }> {
+    const calls: HookCPCall[] = []
+    await writeDockConfig(
+      {
+        apiUrl: 'https://cp.test',
+        directorUrl: null,
+        hostId: 'host_hook',
+        hostCredential: 'hk_hook',
+      },
+      baseDir,
+    )
+    handle = await startServe({
+      baseDir,
+      backend: new FakeBackend(),
+      attentionHook: { fetchImpl: hookFetch(calls, opts) },
+    })
+    const port = handle.attentionHookPort
+    if (port === null) throw new Error('expected a hook port when docked')
+    return { port, calls }
+  }
+
+  /** POST a payload to the loopback hook, returning the status + parsed body. */
+  async function postHook(
+    port: number,
+    payload: unknown,
+  ): Promise<{ status: number; body: { ok?: boolean; suppressed?: boolean; id?: string } }> {
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    return { status: res.status, body: (await res.json().catch(() => ({}))) as { ok?: boolean } }
+  }
+
+  /** Create one live custody session through the local socket; returns its ref. */
+  async function createSession(): Promise<string> {
+    const controller = await connectDaemon(baseDir)
+    const { sessionRef } = await controller.request('custody.reserve', spec)
+    await controller.request('custody.claim', { sessionRef })
+    controller.close()
+    return sessionRef
+  }
+
+  it('advertises the loopback port in a 0600 file while docked', async () => {
+    const { port } = await startDocked()
+    const mode = (await stat(hookPath())).mode & 0o777
+    expect(mode).toBe(0o600)
+    expect(JSON.parse(await readFile(hookPath(), 'utf8'))).toEqual({ port })
+  })
+
+  it('maps a curl-shaped POST → heartbeat + raise, defaulting the session to the latest live one', async () => {
+    const { port, calls } = await startDocked()
+    const sessionRef = await createSession()
+
+    const { status, body } = await postHook(port, {
+      kind: 'asks',
+      summary: 'need a decision',
+      question: 'ship it?',
+    })
+    expect(status).toBe(200)
+    expect(body).toEqual({ ok: true, suppressed: false, id: 'att_hook' })
+
+    // Heartbeat first, then raise; both bearing the hk_ credential.
+    expect(calls.map((c) => c.path)).toEqual(['/v1/host/heartbeat', '/v1/attention'])
+    expect(calls.every((c) => c.token === 'hk_hook')).toBe(true)
+
+    // The heartbeat asserts the session live; the raise is bound to that same ref.
+    const heartbeat = calls[0]?.body as { sessions: { sessionRef: string; status: string }[] }
+    expect(heartbeat.sessions).toEqual([{ sessionRef, status: 'live' }])
+    const raise = calls[1]?.body as { sessionRef: string; kind: string; urgency: string }
+    expect(raise.sessionRef).toBe(sessionRef)
+    expect(raise.kind).toBe('asks')
+    expect(raise.urgency).toBe('notify') // defaulted
+  })
+
+  it('honours an explicit sessionRef in the payload', async () => {
+    const { port, calls } = await startDocked()
+    const ref = newSessionRef()
+    const { status } = await postHook(port, { sessionRef: ref, kind: 'done', summary: 'green' })
+    expect(status).toBe(200)
+    expect((calls[1]?.body as { sessionRef: string }).sessionRef).toBe(ref)
+  })
+
+  it('rejects an invalid event with 400 and makes no control-plane call', async () => {
+    const { port, calls } = await startDocked()
+    const { status } = await postHook(port, {
+      sessionRef: newSessionRef(),
+      kind: 'nope',
+      summary: 'x',
+    })
+    expect(status).toBe(400)
+    expect(calls).toEqual([])
+  })
+
+  it('answers 503 when no session is given and the daemon holds none', async () => {
+    const { port, calls } = await startDocked()
+    const { status } = await postHook(port, { kind: 'done', summary: 'x' })
+    expect(status).toBe(503)
+    expect(calls).toEqual([])
+  })
+
+  it('survives a control-plane failure: 502 to the hook, the daemon still serves locally', async () => {
+    const { port } = await startDocked({ raiseStatus: 500 })
+    const sessionRef = await createSession()
+
+    const { status } = await postHook(port, { kind: 'blocked', summary: 'stuck' })
+    expect(status).toBe(502)
+
+    // The daemon is unharmed — the local socket still lists the session.
+    const controller = await connectDaemon(baseDir)
+    const { sessions } = await controller.request('sessions.list', {})
+    expect(sessions.map((s) => s.sessionRef)).toContain(sessionRef)
+    controller.close()
+  })
+
+  it('opens no listener and writes no file when undocked', async () => {
+    handle = await startServe({ baseDir, backend: new FakeBackend() })
+    expect(handle.attentionHookPort).toBeNull()
+    expect(await exists(hookPath())).toBe(false)
+  })
+
+  it('opens nothing when the hook is disabled, even while docked', async () => {
+    await writeDockConfig(
+      { apiUrl: 'https://cp.test', directorUrl: null, hostId: 'h', hostCredential: 'hk_x' },
+      baseDir,
+    )
+    handle = await startServe({
+      baseDir,
+      backend: new FakeBackend(),
+      attentionHook: { enabled: false },
+    })
+    expect(handle.attentionHookPort).toBeNull()
+    expect(await exists(hookPath())).toBe(false)
+  })
+
+  it('close() removes the port file', async () => {
+    await startDocked()
+    expect(await exists(hookPath())).toBe(true)
+    await handle?.close()
+    handle = undefined
+    expect(await exists(hookPath())).toBe(false)
   })
 })
 

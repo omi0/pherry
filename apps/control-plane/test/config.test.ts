@@ -13,6 +13,32 @@ describe('loadConfig', () => {
     expect(config.rateLimits.cliAuthPerMin).toBe(10)
   })
 
+  it('applies attention-plane defaults when unset', () => {
+    const config = loadConfig({})
+    expect(config.attentionDebounceMs).toBe(30_000)
+    expect(config.attentionLongPollMaxMs).toBe(25_000)
+    expect(config.rateLimits.attentionHostPerMin).toBe(30)
+    expect(config.rateLimits.attentionOrgPerMin).toBe(120)
+  })
+
+  it('reads the attention-plane knobs', () => {
+    const config = loadConfig({
+      ATTENTION_DEBOUNCE_MS: '5000',
+      ATTENTION_LONG_POLL_MAX_MS: '10000',
+      RATE_LIMIT_ATTENTION_HOST_PER_MIN: '7',
+      RATE_LIMIT_ATTENTION_ORG_PER_MIN: '42',
+    })
+    expect(config.attentionDebounceMs).toBe(5_000)
+    expect(config.attentionLongPollMaxMs).toBe(10_000)
+    expect(config.rateLimits.attentionHostPerMin).toBe(7)
+    expect(config.rateLimits.attentionOrgPerMin).toBe(42)
+  })
+
+  it('rejects a non-positive attention knob', () => {
+    expect(() => loadConfig({ ATTENTION_DEBOUNCE_MS: '0' })).toThrow()
+    expect(() => loadConfig({ RATE_LIMIT_ATTENTION_ORG_PER_MIN: '-1' })).toThrow()
+  })
+
   it('leaves every credential undefined when blank (degrade, do not throw)', () => {
     const config = loadConfig({})
     expect(config.databaseUrl).toBeUndefined()

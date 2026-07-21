@@ -16,13 +16,21 @@
 import { realpath } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { runAttach } from '../commands/attach.js'
+import {
+  type AttentionKind,
+  type AttentionUrgency,
+  runAttentionAck,
+  runAttentionList,
+  runAttentionRaise,
+  runAttentionWatch,
+} from '../commands/attention.js'
 import { runAnchor, runBoard, runUnboard } from '../commands/board.js'
 import { runDock } from '../commands/dock.js'
 import { runOpen } from '../commands/open.js'
 import { startRun } from '../commands/run.js'
 import { startServe, stopServe } from '../commands/serve.js'
 import { runSessions } from '../commands/sessions.js'
-import { ControlPlaneError } from '../control-plane-client.js'
+import { type AttentionEventRecord, ControlPlaneError } from '../control-plane-client.js'
 import { livePid } from '../daemon/pidfile.js'
 
 const USAGE = `pherry — steer your coding agents from your phone
@@ -34,6 +42,10 @@ Usage:
   pherry anchor [<repo>]            soft brake: stop custodying new launches here
   pherry unboard [<repo>]           remove the shims / custody entirely
   pherry sessions                   list the daemon's live sessions
+  pherry attention raise --kind <k> --summary <text> [--session <ref>]
+                                    tell your operator a session needs a human
+  pherry attention list | watch | ack <id>
+                                    read, stream, or clear pending attention
 
 Dev / internal:
   pherry serve [--stop]             run (or stop) the persistent custody daemon
@@ -66,6 +78,8 @@ async function main(argv: string[]): Promise<number> {
       return unboardCommand(rest)
     case 'sessions':
       return sessionsCommand()
+    case 'attention':
+      return attentionCommand(rest)
     case 'serve':
       return serveCommand(rest)
     case 'run':
@@ -196,6 +210,185 @@ async function sessionsCommand(): Promise<number> {
     )
   }
   return 0
+}
+
+/** Per-verb help for `pherry attention`, printed when no subcommand + no --summary. */
+const ATTENTION_USAGE = `pherry attention — tell your operator a session needs a human, and read what was raised
+
+Usage:
+  pherry attention raise --kind <done|blocked|asks> --summary <text>
+      [--session <ref>] [--question <text>] [--option <text>]... [--urgency <call|notify|digest>]
+                                    raise an event through the docked host credential
+  pherry attention list  [--api <url>] [--token <tok>] [--since <ms>]
+                                    list pending attention, newest first
+  pherry attention watch [--api <url>] [--token <tok>] [--since <ms>]
+                                    stream pending attention until Ctrl-C
+  pherry attention ack <id> [--api <url>] [--token <tok>]
+                                    clear one pending event
+
+raise reads ~/.pherry/dock.json for the control plane + host credential (dock first).
+list / watch / ack need a device or human token (--token or PHERRY_TOKEN) — never the host key.`
+
+async function attentionCommand(args: string[]): Promise<number> {
+  const known = new Set(['raise', 'list', 'watch', 'ack'])
+  const [first, ...rest] = args
+  const sub = first !== undefined && known.has(first) ? first : undefined
+
+  if (sub === undefined) {
+    // No explicit subcommand: default to `raise` when --summary is present, else help.
+    if (args.some((arg) => arg === '--summary' || arg.startsWith('--summary='))) {
+      return attentionRaiseCommand(args)
+    }
+    process.stdout.write(`${ATTENTION_USAGE}\n`)
+    return 0
+  }
+
+  switch (sub) {
+    case 'raise':
+      return attentionRaiseCommand(rest)
+    case 'list':
+      return attentionListCommand(rest)
+    case 'watch':
+      return attentionWatchCommand(rest)
+    default:
+      return attentionAckCommand(rest)
+  }
+}
+
+async function attentionRaiseCommand(args: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args,
+    allowPositionals: false,
+    options: {
+      session: { type: 'string' },
+      kind: { type: 'string' },
+      summary: { type: 'string' },
+      question: { type: 'string' },
+      option: { type: 'string', multiple: true },
+      urgency: { type: 'string' },
+    },
+  })
+  if (values.kind === undefined) {
+    process.stderr.write('pherry attention raise: --kind <done|blocked|asks> is required\n')
+    return 2
+  }
+  if (values.summary === undefined) {
+    process.stderr.write('pherry attention raise: --summary <text> is required\n')
+    return 2
+  }
+
+  const result = await runAttentionRaise({
+    ...baseDirOption(),
+    kind: values.kind as AttentionKind,
+    summary: values.summary,
+    ...(values.session ? { sessionRef: values.session } : {}),
+    ...(values.question ? { question: values.question } : {}),
+    ...(values.option ? { options: values.option } : {}),
+    ...(values.urgency ? { urgency: values.urgency as AttentionUrgency } : {}),
+  })
+
+  if (result.suppressed) {
+    process.stdout.write(`pherry: attention coalesced (already pending for ${result.sessionRef})\n`)
+  } else {
+    process.stdout.write(`pherry: raised ${result.id} for ${result.sessionRef}\n`)
+  }
+  return 0
+}
+
+async function attentionListCommand(args: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args,
+    allowPositionals: false,
+    options: {
+      api: { type: 'string' },
+      token: { type: 'string' },
+      since: { type: 'string' },
+    },
+  })
+  const apiUrl = values.api ?? process.env.PHERRY_API_URL
+  const token = values.token ?? process.env.PHERRY_TOKEN
+
+  const events = await runAttentionList({
+    ...baseDirOption(),
+    ...(apiUrl ? { apiUrl } : {}),
+    ...(token ? { token } : {}),
+    ...(values.since ? { since: Number.parseInt(values.since, 10) } : {}),
+  })
+
+  if (events.length === 0) {
+    process.stdout.write('pherry: no pending attention\n')
+    return 0
+  }
+  for (const event of events) writeAttentionLine(event)
+  return 0
+}
+
+async function attentionWatchCommand(args: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args,
+    allowPositionals: false,
+    options: {
+      api: { type: 'string' },
+      token: { type: 'string' },
+      since: { type: 'string' },
+    },
+  })
+  const apiUrl = values.api ?? process.env.PHERRY_API_URL
+  const token = values.token ?? process.env.PHERRY_TOKEN
+
+  let stopped = false
+  const onSignal = (): void => {
+    stopped = true
+  }
+  process.once('SIGINT', onSignal)
+  process.once('SIGTERM', onSignal)
+
+  await runAttentionWatch({
+    ...baseDirOption(),
+    ...(apiUrl ? { apiUrl } : {}),
+    ...(token ? { token } : {}),
+    ...(values.since ? { since: Number.parseInt(values.since, 10) } : {}),
+    waitMs: 25_000,
+    onEvent: (event) => writeAttentionLine(event),
+    stop: () => stopped,
+  })
+  return 0
+}
+
+async function attentionAckCommand(args: string[]): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      api: { type: 'string' },
+      token: { type: 'string' },
+    },
+  })
+  const id = positionals[0]
+  if (!id) {
+    process.stderr.write('pherry attention ack: missing <id>\n')
+    return 2
+  }
+  const apiUrl = values.api ?? process.env.PHERRY_API_URL
+  const token = values.token ?? process.env.PHERRY_TOKEN
+
+  await runAttentionAck({
+    ...baseDirOption(),
+    id,
+    ...(apiUrl ? { apiUrl } : {}),
+    ...(token ? { token } : {}),
+  })
+  process.stdout.write(`pherry: acked ${id}\n`)
+  return 0
+}
+
+/** Render one attention event: a header line, then indented question / options. */
+function writeAttentionLine(event: AttentionEventRecord): void {
+  process.stdout.write(
+    `${event.id}  ${event.kind}/${event.urgency}  ${event.sessionRef}  ${event.summary}\n`,
+  )
+  if (event.question) process.stdout.write(`    ? ${event.question}\n`)
+  if (event.options) for (const option of event.options) process.stdout.write(`    - ${option}\n`)
 }
 
 async function serveCommand(args: string[]): Promise<number> {

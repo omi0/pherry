@@ -15,6 +15,7 @@ import type { Config } from './config.js'
 import type { Db } from './db/client.js'
 import type { IdentityProvider } from './identity.js'
 import type { RedisLike } from './redis.js'
+import { attentionRoutes } from './routers/attention.js'
 import { cliAuthRoutes } from './routers/cli-auth.js'
 import { hostRoutes } from './routers/host.js'
 import { internalRoutes } from './routers/internal.js'
@@ -22,6 +23,8 @@ import { pairingRoutes } from './routers/pairing.js'
 import { relayRoutes } from './routers/relay.js'
 import { userRoutes } from './routers/user.js'
 import { webhooksRoutes } from './routers/webhooks.js'
+import type { AttentionChannel } from './services/attention-channels.js'
+import { defaultAttentionChannels } from './services/attention-channels.js'
 
 /** Everything the server needs, injected. No env or network access happens here. */
 export interface ServerDeps {
@@ -35,6 +38,11 @@ export interface ServerDeps {
   readonly config: Config
   /** Injectable clock in epoch milliseconds; defaults to `Date.now`. */
   readonly now?: () => number
+  /**
+   * The attention channel registry (§8); defaults to the three built-ins (real
+   * in-app + push/ring stubs). Tests inject spies to observe routing + fan-out.
+   */
+  readonly attentionChannels?: AttentionChannel[]
 }
 
 declare module 'fastify' {
@@ -49,6 +57,8 @@ declare module 'fastify' {
     appConfig: Config
     /** The injected clock (epoch milliseconds). */
     now: () => number
+    /** The injected attention channel registry (§8). */
+    attentionChannels: AttentionChannel[]
   }
 }
 
@@ -68,6 +78,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   app.decorate('identity', deps.identity)
   app.decorate('appConfig', deps.config)
   app.decorate('now', deps.now ?? (() => Date.now()))
+  app.decorate('attentionChannels', deps.attentionChannels ?? defaultAttentionChannels())
 
   app.get('/healthz', async () => HealthResponse.parse({ ok: true }))
 
@@ -80,6 +91,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   app.register(hostRoutes)
   app.register(relayRoutes)
   app.register(internalRoutes)
+  app.register(attentionRoutes)
   app.register(webhooksRoutes)
 
   return app

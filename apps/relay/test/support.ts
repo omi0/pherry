@@ -30,6 +30,10 @@ export const INTERNAL_KEY = 'relay-internal-secret'
 export const HUMAN_TOKEN = 'human_alice'
 /** The external (IdP) user id the seeded user is keyed to. */
 export const EXT_USER = 'ext_alice'
+/** A second human bearer token — a fully independent org, for cross-org tests. */
+export const SECOND_HUMAN_TOKEN = 'human_bob'
+/** The external (IdP) user id the second org's user is keyed to. */
+export const SECOND_EXT_USER = 'ext_bob'
 
 /** A listening control plane plus the handles a relay test needs. */
 export interface ControlPlane {
@@ -59,7 +63,12 @@ export async function startControlPlane(
   const app = buildServer({
     db,
     redis: new MemoryRedis(),
-    identity: new FakeIdentityProvider(new Map([[HUMAN_TOKEN, EXT_USER]])),
+    identity: new FakeIdentityProvider(
+      new Map([
+        [HUMAN_TOKEN, EXT_USER],
+        [SECOND_HUMAN_TOKEN, SECOND_EXT_USER],
+      ]),
+    ),
     config: loadConfig({
       INTERNAL_API_KEY: INTERNAL_KEY,
       DIRECTOR_URL: 'https://relay.example',
@@ -78,13 +87,21 @@ export async function startControlPlane(
   }
 }
 
-/** Insert the org + user the human token resolves to (the IdP webhook's job in prod). */
-export async function seedIdentity(db: Db): Promise<void> {
+/**
+ * Insert the org + user a human token resolves to (the IdP webhook's job in prod).
+ * Defaults to the primary org keyed to {@link EXT_USER}; pass `{ name, extUserId }`
+ * to seed a second, independent org (e.g. keyed to {@link SECOND_EXT_USER}) for the
+ * cross-org attention checks.
+ */
+export async function seedIdentity(
+  db: Db,
+  opts: { name?: string; extUserId?: string } = {},
+): Promise<void> {
   const orgId = newOrgId()
-  await db.insert(schema.orgs).values({ id: orgId, name: 'Acme' })
+  await db.insert(schema.orgs).values({ id: orgId, name: opts.name ?? 'Acme' })
   await db
     .insert(schema.users)
-    .values({ id: newUserId(), clerkUserId: EXT_USER, primaryOrgId: orgId })
+    .values({ id: newUserId(), clerkUserId: opts.extUserId ?? EXT_USER, primaryOrgId: orgId })
 }
 
 /** Everything the relay side needs to reach one provisioned host through a cell. */

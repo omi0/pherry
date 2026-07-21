@@ -13,7 +13,7 @@
  * Migrations are generated with `pnpm --filter @pherry/control-plane db:generate`
  * and committed under `drizzle/`; {@link migrateDb} applies them to any backend.
  */
-import { pgTable, text, timestamp, unique } from 'drizzle-orm/pg-core'
+import { index, jsonb, pgTable, text, timestamp, unique } from 'drizzle-orm/pg-core'
 
 /** `created_at` / `updated_at`, both timestamptz defaulting to now(). */
 const timestamps = {
@@ -134,6 +134,42 @@ export const sessions = pgTable(
   (table) => [unique('sessions_host_id_session_ref_uq').on(table.hostId, table.sessionRef)],
 )
 
+/**
+ * A raised attention event (§8 — "an agent needs a human"). A host raises one
+ * out-of-band; the control plane persists it here — the row **is** the in-app
+ * pending queue the retrieval surface reads. `question`/`options` carry an `asks`
+ * event's prompt; `urgency` is the routing key (`call`/`notify`/`digest`). A
+ * non-null `ackedAt` clears it from the pending list (one-time, via a guarded
+ * `UPDATE`). Metadata only — the summary/question are host-authored, never session
+ * content the relay carries.
+ */
+export const attentionEvents = pgTable(
+  'attention_events',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => orgs.id),
+    hostId: text('host_id')
+      .notNull()
+      .references(() => hosts.id),
+    sessionRef: text('session_ref').notNull(),
+    kind: text('kind').notNull(),
+    summary: text('summary').notNull(),
+    question: text('question'),
+    options: jsonb('options').$type<string[]>(),
+    urgency: text('urgency').notNull(),
+    ackedAt: timestamp('acked_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    // Newest-first listing per org (the retrieval surface's ordering + `since` cursor).
+    index('attention_events_org_created_idx').on(table.orgId, table.createdAt),
+    // Pending-vs-acked partitioning per org (the un-acked filter the list/ack share).
+    index('attention_events_org_acked_idx').on(table.orgId, table.ackedAt),
+  ],
+)
+
 /** A selected `orgs` row. */
 export type Org = typeof orgs.$inferSelect
 /** A selected `users` row. */
@@ -146,3 +182,5 @@ export type Device = typeof devices.$inferSelect
 export type PairToken = typeof pairTokens.$inferSelect
 /** A selected `sessions` row. */
 export type SessionRow = typeof sessions.$inferSelect
+/** A selected `attention_events` row — the persisted shape a channel delivers. */
+export type AttentionEventRow = typeof attentionEvents.$inferSelect

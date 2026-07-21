@@ -79,9 +79,9 @@ Open packages must have **no import edge into `apps/`**. `apps/` may depend on t
 
 ## Status (as of the last commit)
 
-**Done, green, pushed** — 9 workspace projects, 559 tests: `protocol` (97) · `host` (59) · `channel`
-(71, audited) · `relay-core` (42) · `sdk` (5) · `transport-node` (6) · `cli` (110) · `control-plane`
-(156) · `relay` (13). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
+**Done, green, pushed** — 9 workspace projects, 636 tests: `protocol` (97) · `host` (59) · `channel`
+(71, audited) · `relay-core` (42) · `sdk` (5) · `transport-node` (6) · `cli` (142) · `control-plane`
+(194) · `relay` (20). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
 repo, then typing `gemini` (or `claude`/`codex`/…) is intercepted by a PATH shim → the persistent
 `pherry serve` daemon takes custody → the agent's TUI opens in your terminal while a second viewer
 (`pherry attach`) mirrors the same host-owned session.
@@ -115,4 +115,19 @@ cell, initiator channel pinned to the API-returned host key — same `runTermina
 local. The P2-complete proof (`apps/relay/test/cli-e2e.test.ts`) drives dock → dial-out → pair-redeem
 → remote attach through the real CLI paths over a real HTTP control plane and a real TCP cell.
 
-**Next: P3** iOS app + attention plane · **P4** cloud sandboxes.
+**Leg P3a is done — the attention plane.** A host raises the existing `AttentionEvent` atom (verbatim;
+protocol untouched) out-of-band: `POST /v1/attention` (`hk_`-authed) **suppresses** (Redis `NX`
+debounce per host/session/kind) · **quotas** (per-host + per-org, 429) · **routes** (`call` →
+ring+push+in-app, `notify` → push+in-app, `digest` → in-app) and persists to `attention_events`
+(migration `0001`), fanning out through a pluggable channel registry — in-app real (persistence is the
+pending queue), push + ring registered logging stubs for P3c/P3d. Controllers retrieve org-scoped:
+`GET /v1/attention` (device/human, `since` cursor + bounded long-poll) and one-time
+`POST /v1/attention/:id/ack`. Client side: `ControlPlaneClient.{raiseAttention,listAttention,
+ackAttention}`, the `pherry attention raise|list|watch|ack` verb (raise heartbeats the session first,
+so the binding never races), and a docked daemon's loopback hook intake (`127.0.0.1` ephemeral port in
+`~/.pherry/attention-hook.json`, `0600`) — the curl target for agent stop/notification hooks. Proven
+end-to-end in `apps/relay/test/attention-e2e.test.ts` (real CLI raise → real CLI retrieve/ack, no
+relay needed).
+
+**Next: P3b** dashboard · **P3c** iOS app (ring + push channels) · **P3d** voice worker · **P4** cloud
+sandboxes.

@@ -42,6 +42,10 @@ export interface RateLimitConfig {
   readonly ticketsPerMin: number
   /** Max `POST /v1/cli/auth/{start,exchange}` attempts per minute per client IP. */
   readonly cliAuthPerMin: number
+  /** Max `POST /v1/attention` raises per minute per host. */
+  readonly attentionHostPerMin: number
+  /** Max `POST /v1/attention` raises per minute per org (across all its hosts). */
+  readonly attentionOrgPerMin: number
 }
 
 /** The fully-resolved control-plane configuration. */
@@ -66,6 +70,10 @@ export interface Config {
   readonly cliAuthRequestTtlMs: number
   /** Minted `ct_` CLI human-token time-to-live, in milliseconds. */
   readonly cliTokenTtlMs: number
+  /** Attention-raise suppression/debounce window per `host`/`sessionRef`/`kind`, in ms. */
+  readonly attentionDebounceMs: number
+  /** Ceiling the `GET /v1/attention` long-poll `wait` is clamped to, in milliseconds. */
+  readonly attentionLongPollMaxMs: number
   /** Abuse-control knobs. */
   readonly rateLimits: RateLimitConfig
 }
@@ -89,9 +97,13 @@ const EnvSchema = z.object({
   RELAY_TICKET_TTL_MS: z.coerce.number().int().positive().default(60_000),
   CLI_AUTH_REQUEST_TTL_MS: z.coerce.number().int().positive().default(600_000),
   CLI_TOKEN_TTL_MS: z.coerce.number().int().positive().default(3_600_000),
+  ATTENTION_DEBOUNCE_MS: z.coerce.number().int().positive().default(30_000),
+  ATTENTION_LONG_POLL_MAX_MS: z.coerce.number().int().positive().default(25_000),
   RATE_LIMIT_PAIR_REDEEM_PER_MIN: z.coerce.number().int().positive().default(10),
   RATE_LIMIT_TICKETS_PER_MIN: z.coerce.number().int().positive().default(30),
   RATE_LIMIT_CLI_AUTH_PER_MIN: z.coerce.number().int().positive().default(10),
+  RATE_LIMIT_ATTENTION_HOST_PER_MIN: z.coerce.number().int().positive().default(30),
+  RATE_LIMIT_ATTENTION_ORG_PER_MIN: z.coerce.number().int().positive().default(120),
 })
 
 /** Strip a single trailing slash so URL joins don't double up. */
@@ -134,10 +146,14 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     relayTicketTtlMs: parsed.RELAY_TICKET_TTL_MS,
     cliAuthRequestTtlMs: parsed.CLI_AUTH_REQUEST_TTL_MS,
     cliTokenTtlMs: parsed.CLI_TOKEN_TTL_MS,
+    attentionDebounceMs: parsed.ATTENTION_DEBOUNCE_MS,
+    attentionLongPollMaxMs: parsed.ATTENTION_LONG_POLL_MAX_MS,
     rateLimits: {
       pairRedeemPerMin: parsed.RATE_LIMIT_PAIR_REDEEM_PER_MIN,
       ticketsPerMin: parsed.RATE_LIMIT_TICKETS_PER_MIN,
       cliAuthPerMin: parsed.RATE_LIMIT_CLI_AUTH_PER_MIN,
+      attentionHostPerMin: parsed.RATE_LIMIT_ATTENTION_HOST_PER_MIN,
+      attentionOrgPerMin: parsed.RATE_LIMIT_ATTENTION_ORG_PER_MIN,
     },
   }
 }

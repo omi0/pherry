@@ -14,7 +14,30 @@
  * `node-pty` native addon is never imported until a session actually spawns); tests
  * inject a {@link FakeBackend}. Everything else — clock, base dir, reservation TTL
  * — is injectable, so the whole daemon runs against fakes with no real process.
+ *
+ * ## The attention hook (P3a)
+ *
+ * When the daemon is **docked**, it also opens a `127.0.0.1` loopback listener on an
+ * ephemeral port and advertises it in `<baseDir>/attention-hook.json` (`0600`,
+ * removed on close). It is the v1-proven agent-hook mechanism, trust-by-filesystem
+ * exactly like the leg-3c socket: an agent's stop/notification hook POSTs a small
+ * JSON body and the daemon maps it → an {@link AttentionEvent} and raises it through
+ * the docked credentials — heartbeating the session first, like the CLI `raise`. So
+ * a hook is one line:
+ *
+ * ```sh
+ * curl -s -X POST "http://127.0.0.1:$(jq -r .port ~/.pherry/attention-hook.json)/" \
+ *   -d '{"kind":"asks","summary":"needs a decision","question":"ship it?"}'
+ * ```
+ *
+ * `sessionRef` defaults to the daemon's latest live session (the daemon holds the
+ * registry, so no RPC is needed). A control-plane failure never crashes the daemon —
+ * the local custody path is unaffected. An **undocked** daemon opens nothing.
  */
+import { chmod, unlink, writeFile } from 'node:fs/promises'
+import { type IncomingMessage, type ServerResponse, createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { join } from 'node:path'
 import { type Duplex, SecureChannel } from '@pherry/channel'
 import {
   type Backend,
@@ -27,6 +50,7 @@ import {
   serveConnection,
 } from '@pherry/host'
 import {
+  AttentionEvent,
   PtyOpcode,
   type SessionInfo,
   type SessionRef,
@@ -43,8 +67,8 @@ import {
   type RelayUplinkState,
   startRelayUplink,
 } from '../daemon/relay-uplink.js'
-import { readDockConfig } from '../dock-config.js'
-import { loadOrCreateHostKey } from '../host-key.js'
+import { type DockConfig, readDockConfig } from '../dock-config.js'
+import { defaultHostKeyDir, loadOrCreateHostKey } from '../host-key.js'
 import { hostPidPath, hostSocketPath } from '../paths.js'
 
 /** How long, in ms, an unclaimed custody reservation stays claimable by default. */
@@ -71,6 +95,18 @@ export interface ServeUplinkOptions {
   onStateChange?: (state: RelayUplinkState, error?: Error) => void
 }
 
+/**
+ * Test/config seam for the loopback attention hook (§1 of leg-P3a). Consulted only
+ * when the daemon is docked; production leaves it unset, the hook listens on a real
+ * ephemeral loopback port, and it raises through the real control-plane API.
+ */
+export interface ServeAttentionHookOptions {
+  /** Whether to open the hook listener when docked. Defaults to `true`. */
+  enabled?: boolean
+  /** Override the `fetch` the raise client uses (tests point it at a mock control plane). */
+  fetchImpl?: typeof fetch
+}
+
 /** Options for {@link startServe}. */
 export interface ServeOptions {
   /** Pherry home dir override (tests). Defaults to `~/.pherry`. */
@@ -83,6 +119,8 @@ export interface ServeOptions {
   now?: () => number
   /** Test seam for the relay uplink; ignored entirely when the daemon is not docked. */
   uplink?: ServeUplinkOptions
+  /** Test/config seam for the attention hook; ignored entirely when the daemon is not docked. */
+  attentionHook?: ServeAttentionHookOptions
 }
 
 /** A running custody daemon. */
@@ -93,6 +131,8 @@ export interface ServeHandle {
   readonly pidPath: string
   /** The hostId the outbound relay uplink registered under, or `null` when undocked. */
   readonly relayHostId: string | null
+  /** The loopback attention-hook port, or `null` when undocked / disabled. */
+  readonly attentionHookPort: number | null
   /** Stop listening, dispose every live session, and drop the lock. Idempotent. */
   close(): Promise<void>
 }
@@ -213,6 +253,8 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
   // so a missing/malformed dock config just leaves the daemon local-only.
   let uplink: RelayUplinkHandle | undefined
   let relayHostId: string | null = null
+  let attentionHook: AttentionHookHandle | undefined
+  let attentionHookPort: number | null = null
   try {
     const dock = await readDockConfig(baseDir)
     if (dock !== null && dock.directorUrl !== null) {
@@ -267,12 +309,28 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
         ...(options.uplink?.onStateChange ? { onStateChange: options.uplink.onStateChange } : {}),
       })
     }
+
+    // The loopback attention hook opens for any docked daemon: it only needs the
+    // control plane + host credential (not a director), so it is gated on `dock`
+    // alone, not on the relay's director. Same fail-soft contract as the uplink.
+    if (dock !== null && (options.attentionHook?.enabled ?? true)) {
+      attentionHook = await startAttentionHook({
+        baseDir,
+        dock,
+        registry,
+        ...(options.attentionHook?.fetchImpl ? { fetchImpl: options.attentionHook.fetchImpl } : {}),
+      })
+      attentionHookPort = attentionHook.port
+    }
   } catch {
-    // A malformed dock config (or any uplink-start failure) must not take the local
-    // socket down; the credential is never echoed, so nothing is logged here.
+    // A malformed dock config (or any uplink/hook-start failure) must not take the
+    // local socket down; the credential is never echoed, so nothing is logged here.
     uplink?.close()
     uplink = undefined
     relayHostId = null
+    void attentionHook?.close()
+    attentionHook = undefined
+    attentionHookPort = null
   }
 
   let closed = false
@@ -283,6 +341,8 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     // tear down the shared registry and channels (the relay-bridged channels live
     // in the same set and are closed below like any other).
     uplink?.close()
+    // Tear down the loopback attention hook and remove its advertised port file.
+    await attentionHook?.close()
     // Close live connections first so the server's close callback is not left
     // waiting on them; each close fires onClose, which removes it from the set.
     for (const channel of [...channels]) channel.close()
@@ -292,7 +352,7 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     await removePidFile(baseDir)
   }
 
-  return { socketPath, pidPath: hostPidPath(baseDir), relayHostId, close }
+  return { socketPath, pidPath: hostPidPath(baseDir), relayHostId, attentionHookPort, close }
 }
 
 /**
@@ -324,6 +384,173 @@ export async function stopServe(options: { baseDir?: string } = {}): Promise<Sto
     await delay(50)
   }
   return { running: true, stopped: false }
+}
+
+/** Owner-only mode for the advertised attention-hook port file. */
+const HOOK_FILE_MODE = 0o600
+
+/** A running loopback attention hook. */
+interface AttentionHookHandle {
+  /** The `127.0.0.1` port it bound to. */
+  readonly port: number
+  /** Stop listening and remove the advertised port file. Idempotent. */
+  close(): Promise<void>
+}
+
+/** The advertised hook-port file, `<baseDir>/attention-hook.json`. */
+function attentionHookPath(baseDir: string | undefined): string {
+  return join(baseDir ?? defaultHostKeyDir(), 'attention-hook.json')
+}
+
+/**
+ * Open the loopback attention-hook listener on an ephemeral `127.0.0.1` port and
+ * advertise it in `<baseDir>/attention-hook.json` (`0600`, removed on close). A
+ * `POST /` maps its JSON body → an {@link AttentionEvent} and raises it through the
+ * docked credentials — heartbeating the session first, exactly like the CLI
+ * `raise`. It answers `200 { ok, suppressed, id? }` on a raise, `400` on an
+ * unparseable body or an event the atom rejects, `503` when no session is given and
+ * the daemon holds none, and `502` when the control plane rejects the raise. A
+ * control-plane error never escapes the handler, so the daemon never crashes on one.
+ */
+async function startAttentionHook(args: {
+  baseDir: string | undefined
+  dock: DockConfig
+  registry: SessionRegistry
+  fetchImpl?: typeof fetch
+}): Promise<AttentionHookHandle> {
+  const { baseDir, dock, registry } = args
+  const client = new ControlPlaneClient({
+    apiUrl: dock.apiUrl,
+    ...(args.fetchImpl ? { fetchImpl: args.fetchImpl } : {}),
+  })
+
+  const server = createServer((req, res) => {
+    handleHookRequest(req, res, { client, dock, registry }).catch(() => {
+      // A handler must never reject; if one somehow does, answer rather than crash.
+      if (!res.headersSent) sendHookJson(res, 500, { error: 'internal' })
+    })
+  })
+
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      server.removeListener('error', reject)
+      resolve()
+    })
+  })
+  const port = (server.address() as AddressInfo).port
+
+  const path = attentionHookPath(baseDir)
+  await writeFile(path, `${JSON.stringify({ port }, null, 2)}\n`, { mode: HOOK_FILE_MODE })
+  await chmod(path, HOOK_FILE_MODE).catch(() => {})
+
+  let closed = false
+  return {
+    port,
+    close(): Promise<void> {
+      if (closed) return Promise.resolve()
+      closed = true
+      return new Promise<void>((resolve) => {
+        server.close(() => resolve())
+        // Drop any keep-alive sockets so close() settles promptly (Node ≥18.2).
+        server.closeAllConnections?.()
+      }).finally(() => unlink(path).catch(() => {}))
+    },
+  }
+}
+
+/**
+ * Handle one request to the attention hook. Only `POST /` is served: parse the
+ * body, resolve the session (the given ref, else the daemon's latest live one),
+ * validate the event atom, then heartbeat the session and raise it. Never rejects —
+ * every outcome is a status response.
+ */
+async function handleHookRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: { client: ControlPlaneClient; dock: DockConfig; registry: SessionRegistry },
+): Promise<void> {
+  const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+  if (req.method !== 'POST' || url.pathname !== '/') {
+    sendHookJson(res, 404, { error: 'not-found' })
+    return
+  }
+
+  const raw = await readHookBody(req)
+  let payload: unknown
+  try {
+    payload = raw.length === 0 ? {} : JSON.parse(raw)
+  } catch {
+    sendHookJson(res, 400, { error: 'invalid-json' })
+    return
+  }
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    sendHookJson(res, 400, { error: 'invalid-payload' })
+    return
+  }
+  const body = payload as Record<string, unknown>
+
+  // sessionRef defaults to the daemon's latest live session — the daemon holds the
+  // registry, so no RPC is needed to discover it.
+  const sessionRef =
+    typeof body.sessionRef === 'string' ? body.sessionRef : registryLatest(ctx.registry)
+  if (sessionRef === undefined) {
+    sendHookJson(res, 503, { error: 'no-session' })
+    return
+  }
+
+  const parsed = AttentionEvent.safeParse({
+    sessionRef,
+    kind: body.kind,
+    summary: body.summary,
+    urgency: body.urgency ?? 'notify',
+    ...(body.question !== undefined ? { question: body.question } : {}),
+    ...(body.options !== undefined ? { options: body.options } : {}),
+  })
+  if (!parsed.success) {
+    sendHookJson(res, 400, { error: 'invalid-event' })
+    return
+  }
+
+  try {
+    // Heartbeat the session first (host is authoritative), then raise — same order
+    // and no-404-race guarantee as the CLI `raise`.
+    await ctx.client.heartbeat(ctx.dock.hostCredential, {
+      sessions: [{ sessionRef, status: 'live' }],
+    })
+    const result = await ctx.client.raiseAttention(ctx.dock.hostCredential, parsed.data)
+    sendHookJson(res, 200, {
+      ok: true,
+      suppressed: result.suppressed,
+      ...(result.id !== undefined ? { id: result.id } : {}),
+    })
+  } catch {
+    // A control-plane failure must not crash the daemon; report a gateway error and
+    // carry on. The credential is never echoed, so nothing sensitive is logged.
+    sendHookJson(res, 502, { error: 'control-plane-unreachable' })
+  }
+}
+
+/** The daemon's latest live session ref, or `undefined` when it holds none. */
+function registryLatest(registry: SessionRegistry): string | undefined {
+  return registry.list().at(-1)?.ref
+}
+
+/** Read a request body to a string (empty for a bodiless request). */
+function readHookBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve) => {
+    let data = ''
+    req.on('data', (chunk) => {
+      data += chunk
+    })
+    req.on('end', () => resolve(data))
+  })
+}
+
+/** Send `body` as JSON with `status`, closing the connection so callers settle promptly. */
+function sendHookJson(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { 'content-type': 'application/json', connection: 'close' })
+  res.end(JSON.stringify(body))
 }
 
 /**

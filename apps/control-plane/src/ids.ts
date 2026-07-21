@@ -22,3 +22,6 @@ export const newPairTokenId = (): string => `pt_${hex32()}`
 
 /** Mint a session row id: `ses_<32 hex>`. */
 export const newSessionRowId = (): string => `ses_${hex32()}`
+
+/** Mint an attention-event row id: `att_<32 hex>`. */
+export const newAttentionEventId = (): string => `att_${hex32()}`
