@@ -107,6 +107,8 @@ async function startMockControlPlane(): Promise<MockControlPlane> {
         requestId,
         cliSecret,
         browserUrl: `/cli/auth/${requestId}`,
+        // Headless requests (no callback) carry a display user code; callback ones don't.
+        userCode: callback === null ? 'WXYZ-ABCD' : null,
         expiresAt: Date.now() + 300_000,
         pollIntervalMs: mp.opts.pollIntervalMs,
       })
@@ -422,6 +424,8 @@ describe('runDock — guided onboarding against a control plane', () => {
     // Two starts: the abandoned callback attempt, then the headless one.
     expect(cp.startCalls).toBe(2)
     expect(steps.join('\n')).toContain('open this URL on any device')
+    // The headless flow surfaces the user code to enter on the approval page.
+    expect(steps.join('\n')).toContain('WXYZ-ABCD')
   })
 
   it('rejects with a friendly error when no control plane is configured', async () => {

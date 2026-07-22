@@ -44,12 +44,16 @@ for the full list):
 |---|---|---|
 | `DATABASE_URL` | managed Postgres URL | often needs `?sslmode=require` |
 | `REDIS_URL` | managed Redis URL | `rediss://…` for TLS |
-| `INTERNAL_API_KEY` | a strong shared secret | **must equal the relay's** |
+| `NODE_ENV` | `production` | turns on the boot-time hardening guards below (short internal key, dev identity provider) |
+| `INTERNAL_API_KEY` | a strong shared secret | **must equal the relay's**; **≥32 random bytes in production** (the boot refuses a shorter key when `NODE_ENV=production`) |
+| `TRUST_PROXY` | `1` (or your real proxy-hop count) | see [Per-IP rate limits behind a proxy](#per-ip-rate-limits-behind-a-proxy) — leave unset (`false`) only if the container is directly internet-facing |
 | `API_PUBLIC_URL` | `https://api.yourdomain` | this API's own public base URL |
 | `DIRECTOR_URL` | `tcp://relay.yourdomain:9443` | **embedded verbatim** into pairing QRs + relay tickets — this exact string is what hosts/controllers dial, so it must be the relay's public raw-TCP address |
 | `CLERK_ISSUER` | `https://clerk.yourdomain` (or the Clerk-hosted issuer) | JWKS auto-derives |
 | `CLERK_SECRET_KEY` | `sk_live_…` | mints one-time sign-in tokens |
 | `CLERK_WEBHOOK_SECRET` | `whsec_…` | verifies the user/org sync webhook |
+| `CLERK_AUDIENCE` | your token audience, e.g. `pherry-api` | optional — when set, human tokens must carry a matching `aud`; unset leaves audience unchecked |
+| `MAX_HOSTS_PER_ORG` | `100` (default) | per-org ceiling on non-revoked host registrations; revoking a host frees a slot |
 | `PORT` / `HOST` | `3000` / `0.0.0.0` | the image already defaults these |
 
 **Relay** (see [`apps/relay/.env.example`](../apps/relay/.env.example)):
@@ -111,6 +115,40 @@ output; every credential above is injected at runtime by the platform's secret s
 (`fly secrets`, a k8s Secret, etc.). Keep `INTERNAL_API_KEY` strong and rotate it in
 lockstep across the control plane and all cells. The APNs `.p8` is a secret too — inject
 `APNS_PRIVATE_KEY` at runtime, never commit the key file.
+
+### Production hardening (set `NODE_ENV=production`)
+
+With `NODE_ENV=production` the control plane runs two **boot-time guards** — it refuses
+to start (rather than silently degrade) if either is violated:
+
+- **`INTERNAL_API_KEY` must be ≥32 characters.** The `/internal/relay/*` routes are the
+  relay → control-plane authorizer and are gated **only** by this shared secret, so it
+  must be **≥32 random bytes** in production (e.g. `openssl rand -base64 32`). It is also
+  the same secret both sides hold, so rotate it in lockstep. Just as important: these
+  internal routes **must not be internet-reachable** — keep them on the private network
+  between the relay and the control plane (platform private networking / a firewall);
+  never expose them at the public edge.
+- **The dev identity provider must not boot.** If `DEV_HUMAN_TOKEN` is set in production
+  the boot fails unless you *explicitly* opt in with `ALLOW_DEV_IDENTITY=1`. The dev
+  provider verifies a single shared secret and mints no real sign-in tokens — it exists
+  for local runs without Clerk (see [`running-locally.md`](./running-locally.md)). In
+  production, leave `DEV_HUMAN_TOKEN` unset and use Clerk.
+
+### Per-IP rate limits behind a proxy
+
+The control plane's abuse limits (pair-redeem, CLI-auth, relay-ticket) key on
+`request.ip`. Behind a load balancer or TLS-terminating proxy the socket peer is the
+*proxy*, so **every client would collapse into one rate-limit bucket** unless the app is
+told to read the forwarded client address. Set **`TRUST_PROXY`** to your deployment's
+real proxy-hop count:
+
+- **`TRUST_PROXY` unset / `false`** (default) — trust no proxy; `request.ip` is the
+  socket peer. Correct only when the container is *directly* internet-facing.
+- **`TRUST_PROXY=1`** — one trusted hop; `request.ip` is the client the single fronting
+  proxy recorded (the common case, e.g. Fly's `http_service` or one nginx/ALB in front).
+- **`TRUST_PROXY=<n>`** — trust exactly `n` hops when the request crosses a known chain
+  of proxies. Set it to the *known* hop count only — an over-large value lets a client
+  spoof its IP via a forged `X-Forwarded-For` and evade the per-IP limits.
 
 ### Scaling (straight from the architecture)
 

@@ -240,6 +240,11 @@ async function signInHeadless(
   const browserUrl = resolveApiUrl(apiUrl, start.browserUrl)
   step('pherry: no browser here — open this URL on any device to sign in:')
   step(`  ${browserUrl}`)
+  // The approval page asks for this code; only someone looking at THIS terminal has
+  // it, which is what stops a phished approval from a link alone.
+  if (start.userCode) {
+    step(`pherry: when asked, enter this code — only approve if it matches:  ${start.userCode}`)
+  }
 
   const pollMs = options.pollIntervalMs ?? start.pollIntervalMs
   const deadline = deadlineFrom(options.authTimeoutMs, start.expiresAt)

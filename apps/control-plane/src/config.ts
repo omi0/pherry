@@ -32,6 +32,12 @@ export interface ClerkConfig {
   readonly secretKey: string | undefined
   /** Shared secret for verifying inbound user/org sync webhooks. */
   readonly webhookSecret: string | undefined
+  /**
+   * The expected token `aud` (audience). **Optional** — when set, `verifyHuman`
+   * additionally requires the token's `aud` to match (defence against a token minted
+   * for a different service reaching this API); when blank, audience is not checked.
+   */
+  readonly audience: string | undefined
 }
 
 /**
@@ -69,6 +75,12 @@ export interface RateLimitConfig {
 
 /** The fully-resolved control-plane configuration. */
 export interface Config {
+  /**
+   * The process environment name (`NODE_ENV`), e.g. `production`. Read once here so
+   * {@link validateProductionConfig} can enforce the prod-only boot guards from a
+   * single place; blank/`undefined` outside production leaves those guards inert.
+   */
+  readonly nodeEnv: string | undefined
   /** Postgres connection string; blank in tests (a PGlite `Db` is injected). */
   readonly databaseUrl: string | undefined
   /** Redis connection string; blank in tests (a `MemoryRedis` is injected). */
@@ -88,6 +100,25 @@ export interface Config {
   readonly dashboardUrl: string | undefined
   /** Shared secret guarding the internal relay-validate route (relay → control plane). */
   readonly internalApiKey: string | undefined
+  /**
+   * Fastify's `trustProxy` setting: `false` (default) trusts no proxy, `true` trusts
+   * every hop, and a non-negative integer trusts exactly that many proxy hops. It
+   * governs how `request.ip` is derived from `X-Forwarded-For`, so the per-IP rate
+   * limits key on the real client only when this matches the deployment's proxy depth.
+   */
+  readonly trustProxy: boolean | number
+  /**
+   * Maximum non-revoked hosts a single org may register (`POST /v1/hosts`). A ceiling
+   * on runaway/abusive registration; revoking a host frees a slot. Default 100.
+   */
+  readonly maxHostsPerOrg: number
+  /**
+   * Whether the operator has **explicitly** opted in to the dev identity provider in
+   * production (`ALLOW_DEV_IDENTITY=1`). Off by default, so a stray `DEV_HUMAN_TOKEN`
+   * cannot silently boot the single-shared-secret dev provider in prod
+   * (see {@link validateProductionConfig}).
+   */
+  readonly allowDevIdentity: boolean
   /** Pair-token time-to-live, in milliseconds. */
   readonly pairTokenTtlMs: number
   /** Relay-ticket time-to-live, in milliseconds. */
@@ -120,18 +151,38 @@ export interface Config {
  * malformed `PAIR_TOKEN_TTL_MS=abc` fails fast rather than silently defaulting.
  */
 const EnvSchema = z.object({
+  NODE_ENV: z.string().min(1).optional(),
   DATABASE_URL: z.string().min(1).optional(),
   REDIS_URL: z.string().min(1).optional(),
   CLERK_ISSUER: z.string().min(1).optional(),
   CLERK_JWKS_URL: z.string().min(1).optional(),
   CLERK_SECRET_KEY: z.string().min(1).optional(),
   CLERK_WEBHOOK_SECRET: z.string().min(1).optional(),
+  CLERK_AUDIENCE: z.string().min(1).optional(),
   DIRECTOR_URL: z.string().min(1).optional(),
   API_PUBLIC_URL: z.string().min(1).optional(),
   DASHBOARD_URL: z.string().min(1).optional(),
   INTERNAL_API_KEY: z.string().min(1).optional(),
+  // A boolean (`true`/`false`) or a non-negative proxy hop-count integer; blank → false.
+  TRUST_PROXY: z
+    .string()
+    .optional()
+    .transform((value, ctx) => {
+      if (value === undefined || value === 'false') return false
+      if (value === 'true') return true
+      const hops = Number(value)
+      if (Number.isInteger(hops) && hops >= 0) return hops
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'TRUST_PROXY must be true, false, or a non-negative hop-count integer',
+      })
+      return z.NEVER
+    }),
+  MAX_HOSTS_PER_ORG: z.coerce.number().int().positive().default(100),
   DEV_HUMAN_TOKEN: z.string().min(1).optional(),
   DEV_HUMAN_EXT_USER: z.string().min(1).default('dev_user'),
+  // Explicit prod opt-in for the dev identity provider — only the literal `1` enables it.
+  ALLOW_DEV_IDENTITY: z.string().min(1).optional(),
   APNS_TEAM_ID: z.string().min(1).optional(),
   APNS_KEY_ID: z.string().min(1).optional(),
   APNS_PRIVATE_KEY: z.string().min(1).optional(),
@@ -175,6 +226,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     (issuer !== undefined ? `${trimTrailingSlash(issuer)}/.well-known/jwks.json` : undefined)
 
   return {
+    nodeEnv: parsed.NODE_ENV,
     databaseUrl: parsed.DATABASE_URL,
     redisUrl: parsed.REDIS_URL,
     clerk: {
@@ -182,12 +234,16 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
       jwksUrl,
       secretKey: parsed.CLERK_SECRET_KEY,
       webhookSecret: parsed.CLERK_WEBHOOK_SECRET,
+      audience: parsed.CLERK_AUDIENCE,
     },
     directorUrl: parsed.DIRECTOR_URL,
     apiPublicUrl: parsed.API_PUBLIC_URL,
     dashboardUrl:
       parsed.DASHBOARD_URL !== undefined ? trimTrailingSlash(parsed.DASHBOARD_URL) : undefined,
     internalApiKey: parsed.INTERNAL_API_KEY,
+    trustProxy: parsed.TRUST_PROXY,
+    maxHostsPerOrg: parsed.MAX_HOSTS_PER_ORG,
+    allowDevIdentity: parsed.ALLOW_DEV_IDENTITY === '1',
     devHumanToken: parsed.DEV_HUMAN_TOKEN,
     devHumanExtUser: parsed.DEV_HUMAN_EXT_USER,
     apns: {
@@ -228,4 +284,39 @@ export function apnsConfigured(config: Config): boolean {
     privateKey !== undefined &&
     bundleId !== undefined
   )
+}
+
+/** The minimum length (characters) the internal API key must carry in production. */
+const MIN_INTERNAL_API_KEY_LENGTH = 32
+
+/**
+ * Enforce the production-only invariants that must **fail the boot** rather than
+ * degrade — grouped here so the `NODE_ENV === 'production'` gate is read exactly once:
+ *
+ * - a set `INTERNAL_API_KEY` must be at least {@link MIN_INTERNAL_API_KEY_LENGTH}
+ *   characters — the `/internal/relay/*` routes are only as strong as this shared
+ *   secret, so a short, guessable key in prod is refused (the zod `.min(1)` stays
+ *   loose so dev/test may use short keys);
+ * - the single-shared-secret dev identity provider (`DEV_HUMAN_TOKEN`) must not boot
+ *   in prod unless the operator opts in explicitly with `ALLOW_DEV_IDENTITY=1`.
+ *
+ * A no-op outside production, so tests and local runs are unaffected. Pure over
+ * {@link Config} (unit-tested directly); `main.ts` calls it right after {@link loadConfig}.
+ */
+export function validateProductionConfig(config: Config): void {
+  if (config.nodeEnv !== 'production') return
+  if (
+    config.internalApiKey !== undefined &&
+    config.internalApiKey.length < MIN_INTERNAL_API_KEY_LENGTH
+  ) {
+    throw new Error(
+      `INTERNAL_API_KEY must be at least ${MIN_INTERNAL_API_KEY_LENGTH} characters in production`,
+    )
+  }
+  if (config.devHumanToken !== undefined && !config.allowDevIdentity) {
+    throw new Error(
+      'DEV_HUMAN_TOKEN is set in production — refusing to boot the dev identity provider; ' +
+        'unset it, or set ALLOW_DEV_IDENTITY=1 to opt in explicitly',
+    )
+  }
 }

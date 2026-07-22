@@ -262,15 +262,28 @@ describe('startServe — the attention hook (leg-P3a)', () => {
     return { port, calls }
   }
 
-  /** POST a payload to the loopback hook, returning the status + parsed body. */
+  /** Read the per-daemon hook secret advertised in the `0600` port file. */
+  async function hookSecret(): Promise<string> {
+    return JSON.parse(await readFile(hookPath(), 'utf8')).secret as string
+  }
+
+  /**
+   * POST a payload to the loopback hook, returning the status + parsed body. Sends
+   * the advertised `Bearer` secret by default; `opts.token` overrides it (`null`
+   * omits the header), and `opts.rawBody` sends a raw string instead of JSON.
+   */
   async function postHook(
     port: number,
     payload: unknown,
+    opts: { token?: string | null; rawBody?: string } = {},
   ): Promise<{ status: number; body: { ok?: boolean; suppressed?: boolean; id?: string } }> {
+    const token = 'token' in opts ? opts.token : await hookSecret()
+    const headers: Record<string, string> = { 'content-type': 'application/json' }
+    if (token !== null) headers.authorization = `Bearer ${token}`
     const res = await fetch(`http://127.0.0.1:${port}/`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
+      headers,
+      body: opts.rawBody ?? JSON.stringify(payload),
     })
     return { status: res.status, body: (await res.json().catch(() => ({}))) as { ok?: boolean } }
   }
@@ -284,11 +297,36 @@ describe('startServe — the attention hook (leg-P3a)', () => {
     return sessionRef
   }
 
-  it('advertises the loopback port in a 0600 file while docked', async () => {
+  it('advertises the loopback port + a secret in a 0600 file while docked', async () => {
     const { port } = await startDocked()
     const mode = (await stat(hookPath())).mode & 0o777
     expect(mode).toBe(0o600)
-    expect(JSON.parse(await readFile(hookPath(), 'utf8'))).toEqual({ port })
+    const advertised = JSON.parse(await readFile(hookPath(), 'utf8'))
+    expect(advertised.port).toBe(port)
+    // A fresh 32-byte hex secret gates every request.
+    expect(advertised.secret).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('rejects a request with no bearer secret (401) and makes no control-plane call', async () => {
+    const { port, calls } = await startDocked()
+    const { status } = await postHook(port, { kind: 'done', summary: 'x' }, { token: null })
+    expect(status).toBe(401)
+    expect(calls).toEqual([])
+  })
+
+  it('rejects a request bearing the wrong secret (401) and makes no control-plane call', async () => {
+    const { port, calls } = await startDocked()
+    const { status } = await postHook(port, { kind: 'done', summary: 'x' }, { token: 'wrong' })
+    expect(status).toBe(401)
+    expect(calls).toEqual([])
+  })
+
+  it('refuses an oversized body with 413 and makes no control-plane call', async () => {
+    const { port, calls } = await startDocked()
+    const huge = `{"kind":"done","summary":"${'x'.repeat(70 * 1024)}"}`
+    const { status } = await postHook(port, undefined, { rawBody: huge })
+    expect(status).toBe(413)
+    expect(calls).toEqual([])
   })
 
   it('maps a curl-shaped POST → heartbeat + raise, defaulting the session to the latest live one', async () => {

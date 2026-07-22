@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
-import { DevTokenProvider, useAuth } from '../src/auth'
+import { ConfigErrorCard, DevTokenProvider, chooseAuthSeam, useAuth } from '../src/auth'
 
 const STORAGE_KEY = 'pherry.dev-token'
 
@@ -72,5 +72,31 @@ describe('DevTokenProvider (auth seam)', () => {
     expect(screen.queryByText('SECRET-CONTENT')).toBeNull()
     expect(sessionStorage.getItem(STORAGE_KEY)).toBeNull()
     expect(screen.getByText(/Dev sign-in/)).toBeDefined()
+  })
+})
+
+describe('chooseAuthSeam (fail-closed seam selection)', () => {
+  it('picks clerk whenever a publishable key is configured', () => {
+    expect(chooseAuthSeam({ clerkKey: 'pk_live_x', isProduction: false })).toBe('clerk')
+    expect(chooseAuthSeam({ clerkKey: 'pk_live_x', isProduction: true })).toBe('clerk')
+  })
+
+  it('keeps the dev-token form in a dev/local build with no key', () => {
+    expect(chooseAuthSeam({ clerkKey: undefined, isProduction: false })).toBe('dev-token')
+  })
+
+  it('blocks a production build with no key rather than falling back to dev-token', () => {
+    expect(chooseAuthSeam({ clerkKey: undefined, isProduction: true })).toBe('blocked')
+  })
+})
+
+describe('ConfigErrorCard (production fail-closed state)', () => {
+  it('renders a hard, unrecoverable error and no dev-token paste field', () => {
+    render(<ConfigErrorCard />)
+    expect(screen.getByRole('alert')).toBeDefined()
+    expect(
+      screen.getByText(/refusing to run in dev-token mode in a production build/),
+    ).toBeDefined()
+    expect(screen.queryByPlaceholderText('paste a human token')).toBeNull()
   })
 })

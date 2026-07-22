@@ -1,6 +1,14 @@
 import { type Duplex, generateKeyPair } from '@pherry/channel'
 import { describe, expect, it } from 'vitest'
-import { connectViaCell, createCell, newTicket, registerHostWithCell } from '../src/index.js'
+import { MAX_USED_TICKETS } from '../src/cell.js'
+import {
+  type Cell,
+  OuterConnection,
+  connectViaCell,
+  createCell,
+  newTicket,
+  registerHostWithCell,
+} from '../src/index.js'
 import { FakeTimers, InMemoryAuthorizer, flush, registerHostManually } from './support.js'
 
 const HOST_ID = 'host_tkt'
@@ -33,6 +41,22 @@ async function registerRealHost(
     onConnection: (duplex) => connections.push(duplex),
   })
   return { host, registration, connections }
+}
+
+/**
+ * Fire-and-forget a controller `data-auth` for `ticket` over a raw outer
+ * connection, returning a getter for any close code the cell sends back. Used to
+ * consume many tickets cheaply without spinning up full bridges.
+ */
+function driveController(cell: Cell, ticket: string): () => string | undefined {
+  const conn = new OuterConnection(cell.connectInProcess())
+  let closeCode: string | undefined
+  conn.onError(() => {})
+  conn.onMessage((message) => {
+    if (message.t === 'close') closeCode = message.code
+  })
+  conn.send({ t: 'data-auth', role: 'controller', ticket })
+  return () => closeCode
 }
 
 describe('cell — ticket validation', () => {
@@ -94,5 +118,33 @@ describe('cell — ticket validation', () => {
     timers.advance(5_000) // the bridge timeout fires
     await expect(pending).rejects.toMatchObject({ code: 'bridge-timeout' })
     expect(cell.pendingBridges).toBe(0)
+  })
+
+  it('bounds the used-ticket backstop — evicts the oldest, keeps recent tickets', async () => {
+    const { authorizer, cell } = setup()
+    const host = generateKeyPair()
+    authorizer.registerHost(HOST_ID, host.publicKey)
+    await registerHostManually(cell, HOST_ID, host) // registered; ignores conn-open
+
+    // Consume more distinct tickets than the cap so the oldest are evicted.
+    const total = MAX_USED_TICKETS + 5
+    const tickets: string[] = []
+    for (let i = 0; i < total; i++) {
+      const ticket = newTicket()
+      tickets.push(ticket)
+      authorizer.issueTicket(ticket, { hostId: HOST_ID, expiresAt: NOW + 60_000 })
+      driveController(cell, ticket) // fire-and-forget: consumes the ticket
+    }
+    await flush()
+
+    // The oldest ticket has fallen out of the bounded set, so a reuse is NOT
+    // caught locally (the authorizer's GETDEL stays the real single-use guarantee).
+    const oldest = driveController(cell, tickets[0] as string)
+    // A recent ticket is still remembered, so its reuse is refused.
+    const recent = driveController(cell, tickets[total - 1] as string)
+    await flush()
+
+    expect(oldest()).not.toBe('ticket-reused')
+    expect(recent()).toBe('ticket-reused')
   })
 })

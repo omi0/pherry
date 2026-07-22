@@ -49,6 +49,15 @@ describe('InputFrame', () => {
     expect(InputFrame.safeParse({ sessionRef: 'nope', dataB64: 'aGk=' }).success).toBe(false)
     expect(InputFrame.safeParse({ sessionRef: sref, dataB64: '!!' }).success).toBe(false)
   })
+
+  it('bounds the input payload size', () => {
+    // 64 KiB of base64 chars is the ceiling; a large in-range paste still passes,
+    // but one char past it fails on the dataB64 bound (guarding the PTY write).
+    const atLimit = 'A'.repeat(64 * 1024)
+    expect(InputFrame.safeParse({ sessionRef: sref, dataB64: atLimit }).success).toBe(true)
+    const overLimit = 'A'.repeat(64 * 1024 + 4)
+    expect(InputFrame.safeParse({ sessionRef: sref, dataB64: overLimit }).success).toBe(false)
+  })
 })
 
 describe('ApprovalReply', () => {

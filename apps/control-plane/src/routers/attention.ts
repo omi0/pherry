@@ -124,6 +124,9 @@ export async function attentionRoutes(app: FastifyInstance): Promise<void> {
     if (principal === null) return
     const host = principal.host
 
+    // Charge the per-host budget first and bail on failure *before* touching the
+    // shared org counter — otherwise a host already over its own limit would keep
+    // burning the org's budget on every rejected call.
     const hostOk = await checkRateLimit(
       app.redis,
       'attention-host',
@@ -131,6 +134,9 @@ export async function attentionRoutes(app: FastifyInstance): Promise<void> {
       app.appConfig.rateLimits.attentionHostPerMin,
       60_000,
     )
+    if (!hostOk) {
+      return sendError(reply, 429, 'rate-limited', 'too many attention raises')
+    }
     const orgOk = await checkRateLimit(
       app.redis,
       'attention-org',
@@ -138,7 +144,7 @@ export async function attentionRoutes(app: FastifyInstance): Promise<void> {
       app.appConfig.rateLimits.attentionOrgPerMin,
       60_000,
     )
-    if (!hostOk || !orgOk) {
+    if (!orgOk) {
       return sendError(reply, 429, 'rate-limited', 'too many attention raises')
     }
 

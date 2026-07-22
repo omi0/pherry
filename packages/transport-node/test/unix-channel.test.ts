@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -63,6 +63,16 @@ describe('unix socket carries the secure channel end-to-end', () => {
     expect([...(atInitiator[0] as ChannelFrame).payload]).toEqual([4, 2])
 
     initiator.close()
+    await server.close()
+  })
+
+  it('restricts the socket file to the owner (0600) after listening', async () => {
+    // Windows has no unix-socket file permissions to enforce or assert.
+    if (process.platform === 'win32') return
+    const path = join(dir, 'perm.sock')
+    const server = await listenUnix(path, () => {})
+    const info = await stat(path)
+    expect(info.mode & 0o777).toBe(0o600)
     await server.close()
   })
 

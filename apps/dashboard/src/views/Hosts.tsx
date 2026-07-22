@@ -1,7 +1,8 @@
 /**
  * The **hosts** view — a table with a liveness dot derived from `lastSeenAt`, the key
- * prefix, revoked hosts struck through, and a **Pair phone** action per live host that
- * mints a pair token and shows its `pherry://pair` deep link as a scannable QR.
+ * prefix, revoked hosts struck through, a **Pair phone** action per live host that mints
+ * a pair token and shows its `pherry://pair` deep link as a scannable QR, and an
+ * inline-confirm **Revoke** per host that `DELETE`s it and refreshes.
  */
 import { type ReactNode, useMemo, useState } from 'react'
 import { renderSVG } from 'uqr'
@@ -21,6 +22,23 @@ export function HostsView({ refreshMs = REFRESH_MS }: { refreshMs?: number }): R
   useInterval(() => hosts.reload(), refreshMs)
 
   const [pairing, setPairing] = useState<Host | null>(null)
+  const [confirming, setConfirming] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [rowError, setRowError] = useState<unknown>(null)
+
+  async function revoke(host: Host): Promise<void> {
+    setBusy(host.id)
+    setRowError(null)
+    try {
+      await api.revokeHost(host.id)
+      setConfirming(null)
+      hosts.reload()
+    } catch (err) {
+      setRowError(err)
+    } finally {
+      setBusy(null)
+    }
+  }
 
   if (hosts.loading && hosts.data === null) return <Loading label="Loading hosts…" />
   if (hosts.error !== null && hosts.data === null)
@@ -31,6 +49,7 @@ export function HostsView({ refreshMs = REFRESH_MS }: { refreshMs?: number }): R
 
   return (
     <section className="view hosts">
+      {rowError !== null ? <ErrorNote error={rowError} /> : null}
       {rows.length === 0 ? (
         <p className="muted empty">No hosts yet. Run `pherry dock` on a machine to register one.</p>
       ) : (
@@ -68,6 +87,28 @@ export function HostsView({ refreshMs = REFRESH_MS }: { refreshMs?: number }): R
                         Pair phone
                       </button>
                     ) : null}
+                    {revoked ? (
+                      <span className="muted">revoked</span>
+                    ) : confirming === host.id ? (
+                      <span className="confirm">
+                        <span className="muted">Revoke?</span>
+                        <button
+                          type="button"
+                          className="btn danger"
+                          disabled={busy === host.id}
+                          onClick={() => void revoke(host)}
+                        >
+                          {busy === host.id ? 'Revoking…' : 'Confirm'}
+                        </button>
+                        <button type="button" className="btn" onClick={() => setConfirming(null)}>
+                          Cancel
+                        </button>
+                      </span>
+                    ) : (
+                      <button type="button" className="btn" onClick={() => setConfirming(host.id)}>
+                        Revoke
+                      </button>
+                    )}
                   </td>
                 </tr>
               )

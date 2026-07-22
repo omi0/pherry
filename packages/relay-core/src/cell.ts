@@ -21,12 +21,27 @@
  */
 import type { Duplex } from '@pherry/channel'
 import type { RelayAuthorizer } from './authorizer.js'
-import { type HostChallengeSecret, makeChallenge, verifyProof } from './host-proof.js'
+import {
+  type HostChallengeSecret,
+  makeChallenge,
+  verifyProof,
+  wipeChallenge,
+} from './host-proof.js'
 import { type OuterMessage, RelayCloseCode, fromBase64, toBase64 } from './messages.js'
 import { OuterConnection } from './outer-frame.js'
 
 /** Default bridge timeout: how long a controller waits for its host to dial. */
 const DEFAULT_BRIDGE_TIMEOUT_MS = 10_000
+
+/**
+ * How many recently-used tickets a cell remembers as a local single-use backstop.
+ * The authorizer's global GETDEL is the real single-use guarantee; this bounded
+ * FIFO set only catches a fast reuse racing that global delete, so it never needs
+ * to grow without bound. Once the set exceeds this cap the oldest entries are
+ * evicted — recent tickets (the ones a replay would actually target) stay
+ * protected, while a long-lived cell's memory stays bounded.
+ */
+export const MAX_USED_TICKETS = 1024
 
 const noop = (): void => {}
 
@@ -113,7 +128,9 @@ interface Conn {
   role: ConnRole
   hostId?: string
   hostStaticPub?: Uint8Array
-  challenge?: HostChallengeSecret
+  // Explicit `| undefined` so it can be cleared by assignment after the proof wipe
+  // (under `exactOptionalPropertyTypes`) without the `delete` operator.
+  challenge?: HostChallengeSecret | undefined
   ticket?: string
   bridge?: Bridge | undefined
 }
@@ -289,6 +306,7 @@ class CellImpl implements Cell {
   /** Verify a returned proof and register (replacing any prior control connection). */
   #onProof(conn: Conn, message: OuterMessage): void {
     if (message.t !== 'host-proof') {
+      this.#dropChallenge(conn)
       this.#refuse(conn, RelayCloseCode.ProtocolError)
       return
     }
@@ -297,7 +315,13 @@ class CellImpl implements Cell {
       this.#refuse(conn, RelayCloseCode.ProtocolError)
       return
     }
-    if (!verifyProof(challenge, hostId, hostStaticPub, fromBase64(message.macB64))) {
+    const verified = verifyProof(challenge, hostId, hostStaticPub, fromBase64(message.macB64))
+    // The challenge ephemeral secret has served its only purpose now the proof is
+    // checked; wipe it (best-effort) and drop the reference so it does not linger
+    // on the long-lived control Conn until GC — mirroring the channel's ephemeral
+    // hygiene. Also covers the failure path, whose Conn is about to be dropped.
+    this.#dropChallenge(conn)
+    if (!verified) {
       this.#refuse(conn, RelayCloseCode.ProofFailed)
       return
     }
@@ -306,6 +330,14 @@ class CellImpl implements Cell {
     this.#hosts.set(hostId, conn)
     conn.role = 'control'
     conn.outer.send({ t: 'host-registered', hostId })
+  }
+
+  /** Best-effort wipe a connection's challenge ephemeral secret and drop the reference. */
+  #dropChallenge(conn: Conn): void {
+    if (conn.challenge) {
+      wipeChallenge(conn.challenge)
+      conn.challenge = undefined
+    }
   }
 
   /** Validate a controller's ticket, then signal the host to dial. */
@@ -333,7 +365,7 @@ class CellImpl implements Cell {
       this.#refuse(conn, RelayCloseCode.UnknownHost)
       return
     }
-    this.#usedTickets.add(ticket)
+    this.#markTicketUsed(ticket)
     conn.ticket = ticket
     conn.hostId = record.hostId
     const timer = this.#timers.setTimeout(
@@ -342,6 +374,20 @@ class CellImpl implements Cell {
     )
     this.#pending.set(ticket, { ticket, hostId: record.hostId, controller: conn, timer })
     control.outer.send({ t: 'conn-open', ticket })
+  }
+
+  /**
+   * Record `ticket` in the bounded used-ticket backstop, evicting the oldest
+   * entries once the set exceeds {@link MAX_USED_TICKETS} (FIFO). A `Set` iterates
+   * in insertion order, so the first key is always the oldest.
+   */
+  #markTicketUsed(ticket: string): void {
+    this.#usedTickets.add(ticket)
+    while (this.#usedTickets.size > MAX_USED_TICKETS) {
+      const oldest = this.#usedTickets.values().next().value
+      if (oldest === undefined) break
+      this.#usedTickets.delete(oldest)
+    }
   }
 
   /** The host never dialed in time: fail the waiting controller. */

@@ -20,11 +20,13 @@ export function makeFakeApi(overrides: Partial<DashboardApi> = {}): DashboardApi
     me: overrides.me ?? notStubbed('me'),
     listHosts: overrides.listHosts ?? notStubbed('listHosts'),
     pairHost: overrides.pairHost ?? notStubbed('pairHost'),
+    revokeHost: overrides.revokeHost ?? notStubbed('revokeHost'),
     listSessions: overrides.listSessions ?? notStubbed('listSessions'),
     listDevices: overrides.listDevices ?? notStubbed('listDevices'),
     revokeDevice: overrides.revokeDevice ?? notStubbed('revokeDevice'),
     listAttention: overrides.listAttention ?? notStubbed('listAttention'),
     ackAttention: overrides.ackAttention ?? notStubbed('ackAttention'),
+    describeCliAuth: overrides.describeCliAuth ?? notStubbed('describeCliAuth'),
     approveCliAuth: overrides.approveCliAuth ?? notStubbed('approveCliAuth'),
   }
 }

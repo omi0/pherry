@@ -31,6 +31,22 @@ import { type CliTokenRecord, cliTokenKey, mintSecret, sha256Hex } from './auth.
 /** The poll cadence (ms) the CLI is told to use between exchange attempts. */
 export const CLI_AUTH_POLL_INTERVAL_MS = 3000
 
+/**
+ * How many wrong user-code entries a single headless request tolerates before it is
+ * invalidated. The code is short (for human transcription), so a small budget keeps
+ * it un-brute-forceable while surviving honest typos.
+ */
+const MAX_APPROVE_ATTEMPTS = 5
+
+/**
+ * Alphabet for the headless user code — Crockford-ish, with the visually ambiguous
+ * `I L O 0 1` removed so a human can read it off their terminal without error.
+ */
+const USER_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+
+/** Length of the generated user code (before the display hyphen). 32^8 ≈ 2^40. */
+const USER_CODE_LENGTH = 8
+
 /** The Redis key holding a request's pending record. */
 function requestKey(requestId: string): string {
   return `cliauth:req:${requestId}`
@@ -39,6 +55,32 @@ function requestKey(requestId: string): string {
 /** The Redis key holding a request's approved grant (written on approve, `GETDEL`ed on exchange). */
 function grantKey(requestId: string): string {
   return `cliauth:grant:${requestId}`
+}
+
+/** The Redis key counting wrong user-code attempts against a headless request. */
+function attemptsKey(requestId: string): string {
+  return `cliauth:approve-attempts:${requestId}`
+}
+
+/**
+ * Mint a display user code like `WDJB-MZHT` from CSPRNG bytes. The hyphen is
+ * cosmetic; {@link normalizeUserCode} strips it before hashing/compare.
+ */
+function mintUserCode(): string {
+  const bytes = randomBytes(USER_CODE_LENGTH)
+  let code = ''
+  for (let i = 0; i < USER_CODE_LENGTH; i++) {
+    code += USER_CODE_ALPHABET[(bytes[i] as number) % USER_CODE_ALPHABET.length]
+  }
+  return `${code.slice(0, 4)}-${code.slice(4)}`
+}
+
+/**
+ * Canonicalise a user code for compare: upper-case and drop everything but
+ * `[A-Z0-9]`, so `wdjb-mzht`, `WDJB MZHT`, and `WDJBMZHT` all match.
+ */
+export function normalizeUserCode(value: string): string {
+  return value.toUpperCase().replace(/[^A-Z0-9]/g, '')
 }
 
 /** A fresh `<prefix>_<40 hex>` identifier from 20 random bytes (unguessable). */
@@ -55,6 +97,10 @@ const CliAuthRequest = z.object({
   secretHash: z.string(),
   callback: z.string().nullable(),
   expiresAt: z.number(),
+  // SHA-256 of the normalized headless user code, or `null` for a callback request
+  // (which is bound to loopback instead of a code). Older records without the field
+  // parse as `null` — a callback request, i.e. no code required.
+  userCodeHash: z.string().nullable().default(null),
 })
 
 /**
@@ -118,10 +164,12 @@ export async function describeCliAuthRequest(
   redis: RedisLike,
   now: number,
   requestId: string,
-): Promise<{ requestId: string } | null> {
+): Promise<{ requestId: string; needsCode: boolean } | null> {
   const record = await loadRequest(redis, now, requestId)
   if (record === null) return null
-  return { requestId }
+  // A headless request carries a user-code hash; the approval page must collect the
+  // code. A callback request does not.
+  return { requestId, needsCode: record.userCodeHash !== null }
 }
 
 /** The result of starting a CLI-auth request — everything the CLI needs to proceed. */
@@ -132,6 +180,13 @@ export interface StartCliAuthResult {
   readonly cliSecret: string
   /** Where to open the browser to approve — absolute with `apiPublicUrl`, else relative. */
   readonly browserUrl: string
+  /**
+   * The display user code the CLI must show for a **headless** request (no callback);
+   * the approving human types it on the approval page so approval is bound to a party
+   * that can see the CLI's screen (anti-phishing). `null` for a loopback-callback
+   * request, which is bound to the callback instead and needs no code.
+   */
+  readonly userCode: string | null
   /** Request expiry as epoch milliseconds (`now + cliAuthRequestTtlMs`). */
   readonly expiresAt: number
   /** Suggested delay between exchange polls, in milliseconds. */
@@ -153,11 +208,15 @@ export async function startCliAuth(
 ): Promise<StartCliAuthResult> {
   const requestId = mintId('car')
   const cliSecret = mintId('cas')
+  // A headless request (no loopback callback) is bound by a human-transcribed code;
+  // a callback request is bound by the loopback redirect and needs none.
+  const userCode = callback === null ? mintUserCode() : null
   const expiresAt = now + config.cliAuthRequestTtlMs
   const record: z.infer<typeof CliAuthRequest> = {
     secretHash: sha256Hex(cliSecret),
     callback,
     expiresAt,
+    userCodeHash: userCode === null ? null : sha256Hex(normalizeUserCode(userCode)),
   }
   await redis.set(requestKey(requestId), JSON.stringify(record), {
     nx: true,
@@ -167,6 +226,7 @@ export async function startCliAuth(
     requestId,
     cliSecret,
     browserUrl: `${config.apiPublicUrl ?? ''}/cli/auth/${requestId}`,
+    userCode,
     expiresAt,
     pollIntervalMs: CLI_AUTH_POLL_INTERVAL_MS,
   }
@@ -189,10 +249,27 @@ export interface ApproveCliAuthResult {
 export async function approveCliAuth(
   redis: RedisLike,
   now: number,
-  args: { requestId: string; userId: string },
+  args: { requestId: string; userId: string; userCode?: string },
 ): Promise<ApproveCliAuthResult | null> {
   const record = await loadRequest(redis, now, args.requestId)
   if (record === null) return null
+
+  // Headless requests must present the CLI's user code (anti-phishing): only a party
+  // that can see the terminal that started the flow holds it. A wrong/missing code
+  // spends one of a small per-request budget; exhausting it invalidates the request
+  // so the short code can't be brute-forced. The refusal stays undifferentiated.
+  if (record.userCodeHash !== null) {
+    const provided = args.userCode === undefined ? '' : normalizeUserCode(args.userCode)
+    if (provided.length === 0 || sha256Hex(provided) !== record.userCodeHash) {
+      await redis.set(attemptsKey(args.requestId), '0', {
+        nx: true,
+        pxMs: Math.max(1, record.expiresAt - now),
+      })
+      const attempts = await redis.incr(attemptsKey(args.requestId))
+      if (attempts >= MAX_APPROVE_ATTEMPTS) await redis.del(requestKey(args.requestId))
+      return null
+    }
+  }
 
   let codeHash: string | null = null
   let redirectUrl: string | null = null

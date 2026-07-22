@@ -15,6 +15,8 @@
  * - `organization.created` → upsert `orgs`.
  * - `organizationMembership.created` → ensure the org exists and set the user's
  *   `primary_org_id` when it is still null.
+ * - `organizationMembership.deleted` → offboard: clear the user's `primary_org_id`
+ *   when it points at the org they were just removed from (revoking API access).
  */
 import { and, eq, isNull } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
@@ -33,7 +35,7 @@ const UserEventData = z.object({ id: z.string().min(1) })
 /** `organization.created` payload. */
 const OrgEventData = z.object({ id: z.string().min(1), name: z.string().optional() })
 
-/** `organizationMembership.created` payload (Clerk's nested shape). */
+/** `organizationMembership.created` / `.deleted` payload (Clerk's nested shape). */
 const MembershipEventData = z.object({
   organization: z.object({ id: z.string().min(1), name: z.string().optional() }),
   public_user_data: z.object({ user_id: z.string().min(1) }),
@@ -130,6 +132,24 @@ async function handleEvent(app: FastifyInstance, event: z.infer<typeof ClerkEven
           and(
             eq(users.clerkUserId, data.data.public_user_data.user_id),
             isNull(users.primaryOrgId),
+          ),
+        )
+      return
+    }
+    case 'organizationMembership.deleted': {
+      const data = MembershipEventData.safeParse(event.data)
+      if (!data.success) return
+      // Offboarding: clear the user's primary tenancy only when it is the org they
+      // were removed from, so API access follows membership. Scoping the update to
+      // (clerk id AND primary === removed org) makes a deletion for any *other* org a
+      // no-op, and keeps the handler idempotent (a replayed delete matches nothing).
+      await app.db
+        .update(users)
+        .set({ primaryOrgId: null, updatedAt: now })
+        .where(
+          and(
+            eq(users.clerkUserId, data.data.public_user_data.user_id),
+            eq(users.primaryOrgId, data.data.organization.id),
           ),
         )
       return

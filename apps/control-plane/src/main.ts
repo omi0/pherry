@@ -8,7 +8,7 @@ import { makeApnsPushSender } from './adapters/apns.js'
 import { makeClerkIdentity } from './adapters/clerk.js'
 import { makeIoredis } from './adapters/redis.js'
 import type { Config } from './config.js'
-import { apnsConfigured, loadConfig } from './config.js'
+import { apnsConfigured, loadConfig, validateProductionConfig } from './config.js'
 import { makeDb } from './db/client.js'
 import type { IdentityProvider } from './identity.js'
 import { DevIdentityProvider, selectIdentity } from './identity.js'
@@ -48,6 +48,9 @@ function makePushSender(config: Config): PushSender | undefined {
 /** Load config, construct the real adapters, and start listening. */
 async function main(): Promise<void> {
   const config = loadConfig(process.env)
+  // Fail the boot on the production-only invariants (strong internal key, no accidental
+  // dev identity provider) before opening any connection.
+  validateProductionConfig(config)
   if (config.databaseUrl === undefined) throw new Error('DATABASE_URL is required')
   if (config.redisUrl === undefined) throw new Error('REDIS_URL is required')
 

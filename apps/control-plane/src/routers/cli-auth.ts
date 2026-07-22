@@ -38,12 +38,22 @@ const StartResponse = z.object({
   requestId: z.string(),
   cliSecret: z.string(),
   browserUrl: z.string(),
+  userCode: z.string().nullable(),
   expiresAt: z.number(),
   pollIntervalMs: z.number(),
 })
 
-/** `POST /v1/cli/auth/approve` body: the request to approve. */
-const ApproveBody = z.object({ requestId: z.string().min(1) })
+/** `GET /v1/cli/auth/:requestId` success — what the approval page needs. */
+const DescribeResponse = z.object({
+  requestId: z.string(),
+  needsCode: z.boolean(),
+})
+
+/** `POST /v1/cli/auth/approve` body: the request to approve, and (headless) its user code. */
+const ApproveBody = z.object({
+  requestId: z.string().min(1),
+  userCode: z.string().min(1).optional(),
+})
 
 /** `POST /v1/cli/auth/approve` success — the loopback redirect, or `null` (headless). */
 const ApproveResponse = z.object({
@@ -140,6 +150,17 @@ export async function cliAuthRoutes(app: FastifyInstance): Promise<void> {
     return StartResponse.parse(result)
   })
 
+  // GET /v1/cli/auth/:requestId — JSON describe for the dashboard approval page:
+  // whether the request is live and whether it needs a user code (headless). No auth
+  // (possession of the unguessable requestId is the capability), undifferentiated 404.
+  app.get<{ Params: { requestId: string } }>('/v1/cli/auth/:requestId', async (request, reply) => {
+    const live = await describeCliAuthRequest(app.redis, app.now(), request.params.requestId)
+    if (live === null) {
+      return sendError(reply, 404, 'cli-auth-invalid', 'the CLI auth request is not found')
+    }
+    return DescribeResponse.parse(live)
+  })
+
   // GET /cli/auth/:requestId — the browser approval entrypoint. An unknown/expired
   // request is always the 404 HTML. For a live request: 302 to the dashboard's
   // approval page when DASHBOARD_URL is set, else the minimal P2c HTML page.
@@ -156,19 +177,34 @@ export async function cliAuthRoutes(app: FastifyInstance): Promise<void> {
   })
 
   // POST /v1/cli/auth/approve — approve a pending request as the authenticated human.
+  // Rate-limited per human (not per IP): bounds code-guessing and approve spam by a
+  // single account. A headless request also requires the CLI's user code.
   app.post('/v1/cli/auth/approve', async (request, reply) => {
     const principal = await requireHuman(request, reply)
     if (principal === null) return
+    const allowed = await checkRateLimit(
+      app.redis,
+      'cli-auth-approve',
+      principal.user.id,
+      app.appConfig.rateLimits.cliAuthPerMin,
+      60_000,
+    )
+    if (!allowed) {
+      return sendError(reply, 429, 'rate-limited', 'too many CLI auth approvals')
+    }
     const body = parseBody(reply, ApproveBody, request.body)
     if (body === undefined) return
 
     const result = await approveCliAuth(app.redis, app.now(), {
       requestId: body.requestId,
       userId: principal.user.id,
+      ...(body.userCode !== undefined ? { userCode: body.userCode } : {}),
     })
     if (result === null) {
       return sendError(reply, 404, 'cli-auth-invalid', 'the CLI auth request is not approvable')
     }
+    // Audit trail (no secrets): who approved which request. Silent when logging is off.
+    request.log.info({ userId: principal.user.id, requestId: body.requestId }, 'cli-auth approved')
     return ApproveResponse.parse({ ok: true, redirectUrl: result.redirectUrl })
   })
 

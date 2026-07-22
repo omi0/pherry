@@ -7,7 +7,7 @@
  */
 import { decodeKey } from '@pherry/channel'
 import { newHostId } from '@pherry/protocol'
-import { eq } from 'drizzle-orm'
+import { and, count, eq, isNull } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { devices, hosts, sessions } from '../db/schema.js'
@@ -113,6 +113,21 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     const body = parseBody(reply, CreateHostBody, request.body)
     if (body === undefined) return
 
+    // Per-org registration cap: count the org's non-revoked hosts and refuse at/over
+    // the ceiling (revoking a host frees a slot). Guards against runaway registration.
+    const [active] = await app.db
+      .select({ value: count() })
+      .from(hosts)
+      .where(and(eq(hosts.orgId, principal.org.id), isNull(hosts.revokedAt)))
+    if ((active?.value ?? 0) >= app.appConfig.maxHostsPerOrg) {
+      return sendError(
+        reply,
+        403,
+        'too-many-hosts',
+        `org host limit reached (${app.appConfig.maxHostsPerOrg}); revoke a host to free a slot`,
+      )
+    }
+
     const secret = mintSecret('hk')
     const rows = await app.db
       .insert(hosts)
@@ -172,6 +187,24 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       org: principal.org,
     })
     return PairMintResponse.parse(result)
+  })
+
+  // DELETE /v1/hosts/:id — revoke a host (idempotent; cross-org → 404). Mirrors the
+  // device-revoke route: a non-null revokedAt is honored across every auth/ticket path,
+  // so this is the one place a human kills a compromised or retired host.
+  app.delete<{ Params: { id: string } }>('/v1/hosts/:id', async (request, reply) => {
+    const principal = await requireHuman(request, reply)
+    if (principal === null) return
+    const rows = await app.db.select().from(hosts).where(eq(hosts.id, request.params.id)).limit(1)
+    const host = rows[0]
+    if (host === undefined || host.orgId !== principal.org.id) {
+      return sendError(reply, 404, 'host-not-found', 'no such host')
+    }
+    await app.db
+      .update(hosts)
+      .set({ revokedAt: new Date(app.now()), updatedAt: new Date(app.now()) })
+      .where(eq(hosts.id, host.id))
+    return OkResponse.parse({ ok: true })
   })
 
   // GET /v1/devices — list the caller's org's devices.

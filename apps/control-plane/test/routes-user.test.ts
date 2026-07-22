@@ -130,6 +130,116 @@ describe('POST /v1/hosts', () => {
     })
     expect(res.statusCode).toBe(400)
   })
+
+  it('caps registration per org, and revoking a host frees a slot', async () => {
+    // seedWorld already registered one host ('laptop'); cap the org at two.
+    const world = await seedWorld({ MAX_HOSTS_PER_ORG: '2' })
+    const register = (name: string) =>
+      world.app.inject({
+        method: 'POST',
+        url: '/v1/hosts',
+        headers: { authorization: `Bearer ${world.humanToken}` },
+        payload: { name, staticPublicKeyB64: freshKeyB64() },
+      })
+
+    // The second host reaches the cap...
+    expect((await register('second')).statusCode).toBe(200)
+    // ...and a third is refused with a clear 403.
+    const over = await register('third')
+    expect(over.statusCode).toBe(403)
+    expect(over.json().error.code).toBe('too-many-hosts')
+
+    // Only non-revoked hosts count, so revoking one opens a slot again.
+    await world.db.update(hosts).set({ revokedAt: new Date() }).where(eq(hosts.id, world.host.id))
+    expect((await register('replacement')).statusCode).toBe(200)
+  })
+})
+
+describe('DELETE /v1/hosts/:id', () => {
+  it('revokes the caller host, after which its credential and pairing fail', async () => {
+    const world = await seedWorld()
+    const del = await world.app.inject({
+      method: 'DELETE',
+      url: `/v1/hosts/${world.host.id}`,
+      headers: { authorization: `Bearer ${world.humanToken}` },
+    })
+    expect(del.statusCode).toBe(200)
+    expect(del.json()).toEqual({ ok: true })
+
+    // The revokedAt stamp is honored across auth paths: the hk_ credential is dead...
+    const hb = await world.app.inject({
+      method: 'POST',
+      url: '/v1/host/heartbeat',
+      headers: { authorization: `Bearer ${world.hostToken}` },
+    })
+    expect(hb.statusCode).toBe(401)
+
+    // ...and the host can no longer mint pair tokens (revoked → undifferentiated 404).
+    const pair = await world.app.inject({
+      method: 'POST',
+      url: `/v1/hosts/${world.host.id}/pair`,
+      headers: { authorization: `Bearer ${world.humanToken}` },
+    })
+    expect(pair.statusCode).toBe(404)
+    expect(pair.json().error.code).toBe('host-not-found')
+  })
+
+  it('is idempotent — a second revoke still returns ok', async () => {
+    const world = await seedWorld()
+    const revoke = () =>
+      world.app.inject({
+        method: 'DELETE',
+        url: `/v1/hosts/${world.host.id}`,
+        headers: { authorization: `Bearer ${world.humanToken}` },
+      })
+    expect((await revoke()).json()).toEqual({ ok: true })
+    const second = await revoke()
+    expect(second.statusCode).toBe(200)
+    expect(second.json()).toEqual({ ok: true })
+  })
+
+  it('404s a host in another org (invisible, not forbidden) and leaves it untouched', async () => {
+    const world = await seedWorld()
+    const otherOrg = await seedOrg(world.db, 'Other')
+    const otherUser = await seedUser(world.db, { orgId: otherOrg.id })
+    const foreign = await seedHost(world.db, {
+      orgId: otherOrg.id,
+      userId: otherUser.id,
+      name: 'foreign',
+    })
+    const del = await world.app.inject({
+      method: 'DELETE',
+      url: `/v1/hosts/${foreign.host.id}`,
+      headers: { authorization: `Bearer ${world.humanToken}` },
+    })
+    expect(del.statusCode).toBe(404)
+    expect(del.json().error.code).toBe('host-not-found')
+
+    // A cross-org caller never revokes the foreign host.
+    const rows = await world.db.select().from(hosts).where(eq(hosts.id, foreign.host.id))
+    expect(rows[0]?.revokedAt).toBeNull()
+  })
+
+  it.each([
+    ['no token', undefined],
+    ['a host hk_ token', 'host'],
+    ['a device dt_ token', 'device'],
+  ])('401s a non-human caller: %s', async (_label, which) => {
+    const world = await seedWorld()
+    const token =
+      which === 'host' ? world.hostToken : which === 'device' ? world.deviceToken : undefined
+    const del = await world.app.inject({
+      method: 'DELETE',
+      url: `/v1/hosts/${world.host.id}`,
+      ...(token !== undefined ? { headers: { authorization: `Bearer ${token}` } } : {}),
+    })
+    expect(del.statusCode).toBe(401)
+    expect(del.json().error.code).toBe('unauthenticated')
+
+    // A rejected caller never revokes.
+    const rows = await world.db.select().from(hosts).where(eq(hosts.id, world.host.id))
+    expect(rows[0]?.revokedAt).toBeNull()
+  })
 })
 
 describe('GET /v1/hosts', () => {
@@ -174,14 +284,31 @@ describe('POST /v1/hosts/:id/pair', () => {
     expect(body.qrUrl).toContain('&api=')
   })
 
-  it('embeds the API public url in the QR when configured', async () => {
+  it('embeds the API public url in the QR when configured (percent-encoded)', async () => {
     const world = await seedWorld({ API_PUBLIC_URL: 'https://api.pherry.dev' })
     const res = await world.app.inject({
       method: 'POST',
       url: `/v1/hosts/${world.host.id}/pair`,
       headers: { authorization: `Bearer ${world.humanToken}` },
     })
-    expect(res.json().qrUrl).toContain('&api=https://api.pherry.dev')
+    // Every query value is percent-encoded, so the URL round-trips through URLSearchParams.
+    const qrUrl = res.json().qrUrl as string
+    expect(qrUrl).toContain(`&api=${encodeURIComponent('https://api.pherry.dev')}`)
+    expect(new URL(qrUrl).searchParams.get('api')).toBe('https://api.pherry.dev')
+  })
+
+  it('encodes a director url containing query metacharacters — no param injection', async () => {
+    const director = 'https://d.example/?a=1&injected=evil'
+    const world = await seedWorld({ DIRECTOR_URL: director })
+    const res = await world.app.inject({
+      method: 'POST',
+      url: `/v1/hosts/${world.host.id}/pair`,
+      headers: { authorization: `Bearer ${world.humanToken}` },
+    })
+    const params = new URL(res.json().qrUrl as string).searchParams
+    // The `&`/`=` inside the value survive as data, not as extra query params.
+    expect(params.get('director')).toBe(director)
+    expect(params.has('injected')).toBe(false)
   })
 
   it('404s a revoked host', async () => {

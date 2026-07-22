@@ -61,4 +61,26 @@ describe('POST /v1/host/heartbeat', () => {
     const res = await heartbeat(world, { sessions: [{ sessionRef: 'not-a-ref', status: 'live' }] })
     expect(res.statusCode).toBe(400)
   })
+
+  it('rejects a heartbeat reporting more than 100 sessions with 400', async () => {
+    const world = await seedWorld()
+    const oversized = Array.from({ length: 101 }, () => ({
+      sessionRef: newSessionRef(),
+      status: 'live' as const,
+    }))
+    const res = await heartbeat(world, { sessions: oversized })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('accepts a heartbeat reporting exactly 100 sessions', async () => {
+    const world = await seedWorld()
+    const atCap = Array.from({ length: 100 }, () => ({
+      sessionRef: newSessionRef(),
+      status: 'live' as const,
+    }))
+    const res = await heartbeat(world, { sessions: atCap })
+    expect(res.statusCode).toBe(200)
+    const rows = await world.db.select().from(sessions).where(eq(sessions.hostId, world.host.id))
+    expect(rows).toHaveLength(100)
+  })
 })

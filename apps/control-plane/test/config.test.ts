@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { loadConfig } from '../src/config.js'
+import { type Config, loadConfig, validateProductionConfig } from '../src/config.js'
 
 describe('loadConfig', () => {
   it('applies TTL and rate-limit defaults when unset', () => {
@@ -179,5 +179,91 @@ describe('loadConfig', () => {
 
   it('rejects an invalid APNS_ENVIRONMENT', () => {
     expect(() => loadConfig({ APNS_ENVIRONMENT: 'staging' })).toThrow()
+  })
+
+  it('defaults the abuse/proxy/prod knobs when unset', () => {
+    const config = loadConfig({})
+    expect(config.nodeEnv).toBeUndefined()
+    expect(config.trustProxy).toBe(false)
+    expect(config.maxHostsPerOrg).toBe(100)
+    expect(config.allowDevIdentity).toBe(false)
+    expect(config.clerk.audience).toBeUndefined()
+  })
+
+  it('parses TRUST_PROXY as a boolean or a hop-count integer', () => {
+    expect(loadConfig({ TRUST_PROXY: 'true' }).trustProxy).toBe(true)
+    expect(loadConfig({ TRUST_PROXY: 'false' }).trustProxy).toBe(false)
+    expect(loadConfig({ TRUST_PROXY: '2' }).trustProxy).toBe(2)
+    expect(loadConfig({ TRUST_PROXY: '0' }).trustProxy).toBe(0)
+    expect(loadConfig({ TRUST_PROXY: '' }).trustProxy).toBe(false)
+  })
+
+  it('rejects a non-boolean, non-integer TRUST_PROXY', () => {
+    expect(() => loadConfig({ TRUST_PROXY: 'yes' })).toThrow()
+    expect(() => loadConfig({ TRUST_PROXY: '-1' })).toThrow()
+    expect(() => loadConfig({ TRUST_PROXY: '1.5' })).toThrow()
+  })
+
+  it('reads MAX_HOSTS_PER_ORG and rejects a non-positive value', () => {
+    expect(loadConfig({ MAX_HOSTS_PER_ORG: '5' }).maxHostsPerOrg).toBe(5)
+    expect(() => loadConfig({ MAX_HOSTS_PER_ORG: '0' })).toThrow()
+    expect(() => loadConfig({ MAX_HOSTS_PER_ORG: '-3' })).toThrow()
+  })
+
+  it('reads NODE_ENV, CLERK_AUDIENCE, and ALLOW_DEV_IDENTITY', () => {
+    const config = loadConfig({
+      NODE_ENV: 'production',
+      CLERK_AUDIENCE: 'pherry-api',
+      ALLOW_DEV_IDENTITY: '1',
+    })
+    expect(config.nodeEnv).toBe('production')
+    expect(config.clerk.audience).toBe('pherry-api')
+    expect(config.allowDevIdentity).toBe(true)
+  })
+
+  it('treats any ALLOW_DEV_IDENTITY value other than "1" as off', () => {
+    expect(loadConfig({ ALLOW_DEV_IDENTITY: 'true' }).allowDevIdentity).toBe(false)
+    expect(loadConfig({ ALLOW_DEV_IDENTITY: 'yes' }).allowDevIdentity).toBe(false)
+  })
+})
+
+describe('validateProductionConfig', () => {
+  /** Build a config with `env`, overriding NODE_ENV to production for these guards. */
+  const prodConfig = (env: Record<string, string | undefined> = {}): Config =>
+    loadConfig({ NODE_ENV: 'production', ...env })
+
+  it('is a no-op outside production (short key + dev token both allowed)', () => {
+    const config = loadConfig({ INTERNAL_API_KEY: 'short', DEV_HUMAN_TOKEN: 'dev_secret' })
+    expect(() => validateProductionConfig(config)).not.toThrow()
+  })
+
+  it('throws in production when the internal API key is shorter than 32 chars', () => {
+    expect(() => validateProductionConfig(prodConfig({ INTERNAL_API_KEY: 'short' }))).toThrow(
+      /INTERNAL_API_KEY must be at least 32/,
+    )
+  })
+
+  it('accepts a >=32-char internal API key in production', () => {
+    expect(() =>
+      validateProductionConfig(prodConfig({ INTERNAL_API_KEY: 'x'.repeat(32) })),
+    ).not.toThrow()
+  })
+
+  it('accepts a production boot with no internal API key set', () => {
+    expect(() => validateProductionConfig(prodConfig({}))).not.toThrow()
+  })
+
+  it('throws in production when a dev token is set without the explicit opt-in', () => {
+    expect(() => validateProductionConfig(prodConfig({ DEV_HUMAN_TOKEN: 'dev_secret' }))).toThrow(
+      /DEV_HUMAN_TOKEN is set in production/,
+    )
+  })
+
+  it('accepts a production dev token only with ALLOW_DEV_IDENTITY=1', () => {
+    expect(() =>
+      validateProductionConfig(
+        prodConfig({ DEV_HUMAN_TOKEN: 'dev_secret', ALLOW_DEV_IDENTITY: '1' }),
+      ),
+    ).not.toThrow()
   })
 })

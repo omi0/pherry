@@ -291,10 +291,12 @@ describe('the P2-complete proof: a remote CLI controller reaches a docked host o
     expect(dock?.hostId).toBe(dockResult.hostId)
 
     // The QR carries the pairing token, host, pinned key, and the relay to dial.
-    expect(dockResult.pair.qrUrl).toContain(`token=${dockResult.pair.pairToken}`)
-    expect(dockResult.pair.qrUrl).toContain(`host=${dockResult.hostId}`)
-    expect(dockResult.pair.qrUrl).toContain('key=')
-    expect(dockResult.pair.qrUrl).toContain(`director=${directorUrl}`)
+    // Query values are percent-encoded, so parse and compare the decoded params.
+    const qr = new URL(dockResult.pair.qrUrl)
+    expect(qr.searchParams.get('token')).toBe(dockResult.pair.pairToken)
+    expect(qr.searchParams.get('host')).toBe(dockResult.hostId)
+    expect(qr.searchParams.get('key')).not.toBeNull()
+    expect(qr.searchParams.get('director')).toBe(directorUrl)
   })
 
   it('brings the host up on the relay: it dialed out and registered with the cell', () => {

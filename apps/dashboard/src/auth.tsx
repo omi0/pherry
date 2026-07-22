@@ -6,8 +6,10 @@
  *   Clerk's own sign-in UI when signed out, and `getToken` from Clerk's `useAuth`.
  *   All Clerk wiring lives in `./clerk-auth`, imported **lazily** so a clerk-less
  *   build never loads it and no test path ever touches Clerk.
- * - **dev-token** mode (otherwise): a small card that stores a pasted human bearer in
- *   `sessionStorage`; `signOut` clears it.
+ * - **dev-token** mode (otherwise, in a dev/local build only): a small card that stores a
+ *   pasted human bearer in `sessionStorage`; `signOut` clears it. A **production** build
+ *   with no Clerk key fails closed instead ({@link ConfigErrorCard}) — it never silently
+ *   drops into the paste seam against a real API.
  *
  * Tests never render {@link AuthProvider}; they inject a fake value straight into
  * {@link AuthContext}, so neither Clerk nor `sessionStorage` gating is on the test
@@ -56,9 +58,30 @@ const ClerkAuthProvider = lazy(() => import('./clerk-auth'))
 /** The `sessionStorage` key the dev-token seam stores the pasted bearer under. */
 const DEV_TOKEN_KEY = 'pherry.dev-token'
 
+/** Which seam {@link AuthProvider} mounts: Clerk, the dev-token form, or a fail-closed block. */
+export type AuthSeam = 'clerk' | 'dev-token' | 'blocked'
+
 /**
- * Choose the seam from {@link config}: clerk mode when a publishable key is set (the
- * Clerk chunk is lazily loaded), else the dev-token form.
+ * Decide which seam to mount from the resolved config:
+ *
+ * - a Clerk publishable key present → `clerk`;
+ * - otherwise, a dev/local build → `dev-token` (the paste form);
+ * - otherwise (a **production** build with no key) → `blocked`. A misbuilt production
+ *   dashboard must fail closed, never silently invite pasting a long-lived human bearer
+ *   into `sessionStorage` against a real API.
+ */
+export function chooseAuthSeam(opts: {
+  clerkKey: string | undefined
+  isProduction: boolean
+}): AuthSeam {
+  if (opts.clerkKey !== undefined) return 'clerk'
+  return opts.isProduction ? 'blocked' : 'dev-token'
+}
+
+/**
+ * Choose the seam via {@link chooseAuthSeam}: clerk mode when a publishable key is set
+ * (the Clerk chunk is lazily loaded); else the dev-token form in dev/local, or a hard
+ * blocked state in a production build with no key.
  */
 export function AuthProvider({ children }: { children: ReactNode }): ReactNode {
   const key = config.clerkPublishableKey
@@ -69,7 +92,31 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactNode {
       </Suspense>
     )
   }
-  return <DevTokenProvider>{children}</DevTokenProvider>
+  // No Clerk key: fail closed in production, else keep the dev-token paste form.
+  return chooseAuthSeam({ clerkKey: key, isProduction: config.isProduction }) === 'blocked' ? (
+    <ConfigErrorCard />
+  ) : (
+    <DevTokenProvider>{children}</DevTokenProvider>
+  )
+}
+
+/**
+ * The fail-closed state for a production build with **no** Clerk key configured. Rather
+ * than silently dropping into the dev-token paste seam — which would invite pasting a
+ * long-lived human bearer into `sessionStorage` against a real API — the app refuses to
+ * run and shows a hard, unrecoverable error.
+ */
+export function ConfigErrorCard(): ReactNode {
+  return (
+    <div className="signin-shell">
+      <div className="card signin-card auth-blocked" role="alert">
+        <h1>Pherry</h1>
+        <p className="error-note">
+          Clerk is not configured; refusing to run in dev-token mode in a production build.
+        </p>
+      </div>
+    </div>
+  )
 }
 
 /**

@@ -56,7 +56,7 @@ export {
 } from './outer-frame.js'
 
 // Host proof
-export { makeChallenge, proveHost, verifyProof } from './host-proof.js'
+export { makeChallenge, proveHost, verifyProof, wipeChallenge } from './host-proof.js'
 export type { HostChallenge, HostChallengeSecret } from './host-proof.js'
 
 // Channel context binding

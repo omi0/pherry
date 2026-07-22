@@ -2,7 +2,11 @@ import { newHostId } from '@pherry/protocol'
 import { eq } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import { hosts } from '../src/db/schema.js'
+import { sha256Hex } from '../src/services/auth.js'
 import { TEST_NOW, seedDevice, seedHost, seedOrg, seedUser, seedWorld } from './support.js'
+
+/** The Redis key a ticket lives at — the ticket is hashed, never stored verbatim. */
+const relayTicketKey = (ticket: string) => `relay:tkt:${sha256Hex(ticket)}`
 
 const requestTicket = (
   world: Awaited<ReturnType<typeof seedWorld>>,
@@ -27,8 +31,10 @@ describe('POST /v1/relay/tickets', () => {
     expect(body.cellUrl).toBe('https://relay.example')
     expect(body.hostPublicKeyB64).toBe(world.host.staticPublicKey)
 
-    // The record lives at relay:tkt:<ticket> and expires with the TTL.
-    const raw = await world.redis.get(`relay:tkt:${body.ticket}`)
+    // The record lives at relay:tkt:<sha256(ticket)> — the raw ticket is never a key,
+    // so a Redis SCAN/KEYS reader cannot harvest usable tickets.
+    expect(await world.redis.get(`relay:tkt:${body.ticket}`)).toBeNull()
+    const raw = await world.redis.get(relayTicketKey(body.ticket))
     expect(raw).not.toBeNull()
     expect(JSON.parse(raw as string)).toMatchObject({
       hostId: world.host.id,
@@ -37,14 +43,14 @@ describe('POST /v1/relay/tickets', () => {
       principalId: world.device.id,
     })
     world.setNow(TEST_NOW + world.config.relayTicketTtlMs)
-    expect(await world.redis.get(`relay:tkt:${body.ticket}`)).toBeNull()
+    expect(await world.redis.get(relayTicketKey(body.ticket))).toBeNull()
   })
 
   it('issues a ticket to a human token as well', async () => {
     const world = await seedWorld()
     const res = await requestTicket(world, world.humanToken, world.host.id)
     expect(res.statusCode).toBe(200)
-    const raw = await world.redis.get(`relay:tkt:${res.json().ticket}`)
+    const raw = await world.redis.get(relayTicketKey(res.json().ticket))
     expect(JSON.parse(raw as string)).toMatchObject({
       principalKind: 'human',
       principalId: world.user.id,

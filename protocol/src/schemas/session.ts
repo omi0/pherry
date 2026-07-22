@@ -9,10 +9,21 @@ export const Size = z.object({
 })
 export type Size = z.infer<typeof Size>
 
+/**
+ * Ceiling on a single input frame's base64 payload, in characters.
+ *
+ * Input frames carry keystrokes and pastes the host decodes and writes straight
+ * to the PTY, so a generous paste — a screenful of text, a wrapped path — must
+ * pass, but one frame must not approach the channel's 4 MiB record cap (the only
+ * other bound on this field). 64 KiB of base64 decodes to ~48 KiB of bytes:
+ * ample for any real paste while refusing a multi-megabyte single write.
+ */
+const MAX_INPUT_B64 = 64 * 1024
+
 /** Controller -> host input: opaque bytes (base64) destined for the PTY. */
 export const InputFrame = z.object({
   sessionRef: SessionRef,
-  dataB64: Base64,
+  dataB64: Base64.max(MAX_INPUT_B64, 'input payload too large'),
 })
 export type InputFrame = z.infer<typeof InputFrame>
 

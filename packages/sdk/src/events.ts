@@ -41,7 +41,22 @@ interface PendingSnapshot {
   readonly cols: number
   readonly rows: number
   readonly chunks: Uint8Array[]
+  /** Running total of `chunks` byte lengths, checked against the reassembly cap. */
+  bytes: number
 }
+
+/**
+ * Ceilings on snapshot reassembly. A full-screen snapshot arrives as
+ * `SnapshotStart` + N × `SnapshotChunk` + `SnapshotEnd`; the controller buffers
+ * every chunk in memory until `SnapshotEnd` before emitting one `snapshot`
+ * event. Each chunk can be as large as the channel's 4 MiB record cap, so
+ * without a ceiling a buggy or hostile host could stream chunks forever and
+ * exhaust controller memory. A serialized-ANSI screen is comfortably under a
+ * megabyte; 8 MiB total (and at most 4096 chunks) is generous headroom while
+ * still refusing an unbounded stream.
+ */
+const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
+const MAX_SNAPSHOT_CHUNKS = 4096
 
 /**
  * Turns an in-order PTY frame stream (fed via {@link ingest}) into a
@@ -49,22 +64,33 @@ interface PendingSnapshot {
  */
 export class PtyEventStream implements PtyEvents {
   #queue: PtyEvent[] = []
-  #pullers: Array<(result: IteratorResult<PtyEvent>) => void> = []
+  #pullers: Array<{
+    resolve: (result: IteratorResult<PtyEvent>) => void
+    reject: (error: Error) => void
+  }> = []
   #listeners = new Set<(event: PtyEvent) => void>()
   #snapshot: PendingSnapshot | null = null
   #ended = false
+  #error: Error | null = null
 
   /** Feed one decoded PTY frame; emits zero or one {@link PtyEvent}. */
   ingest(frame: PtyFrame): void {
     switch (frame.opcode) {
       case PtyOpcode.SnapshotStart: {
         const { cols, rows } = decodeSizePayload(frame.payload)
-        this.#snapshot = { seq: frame.seq, cols, rows, chunks: [] }
+        this.#snapshot = { seq: frame.seq, cols, rows, chunks: [], bytes: 0 }
         return
       }
-      case PtyOpcode.SnapshotChunk:
-        this.#snapshot?.chunks.push(frame.payload)
+      case PtyOpcode.SnapshotChunk: {
+        const snap = this.#snapshot
+        if (!snap) return
+        snap.chunks.push(frame.payload)
+        snap.bytes += frame.payload.length
+        if (snap.bytes > MAX_SNAPSHOT_BYTES || snap.chunks.length > MAX_SNAPSHOT_CHUNKS) {
+          this.#fail(new Error('snapshot reassembly exceeded its size limit'))
+        }
         return
+      }
       case PtyOpcode.SnapshotEnd: {
         const snap = this.#snapshot
         this.#snapshot = null
@@ -108,7 +134,7 @@ export class PtyEventStream implements PtyEvents {
   end(): void {
     if (this.#ended) return
     this.#ended = true
-    for (const pull of this.#pullers) pull({ value: undefined, done: true })
+    for (const pull of this.#pullers) pull.resolve({ value: undefined, done: true })
     this.#pullers = []
   }
 
@@ -117,8 +143,9 @@ export class PtyEventStream implements PtyEvents {
       next: (): Promise<IteratorResult<PtyEvent>> => {
         const queued = this.#queue.shift()
         if (queued !== undefined) return Promise.resolve({ value: queued, done: false })
+        if (this.#error) return Promise.reject(this.#error)
         if (this.#ended) return Promise.resolve({ value: undefined, done: true })
-        return new Promise((resolve) => this.#pullers.push(resolve))
+        return new Promise((resolve, reject) => this.#pullers.push({ resolve, reject }))
       },
     }
   }
@@ -127,8 +154,24 @@ export class PtyEventStream implements PtyEvents {
     if (this.#ended) return
     for (const listener of this.#listeners) listener(event)
     const pull = this.#pullers.shift()
-    if (pull) pull({ value: event, done: false })
+    if (pull) pull.resolve({ value: event, done: false })
     else this.#queue.push(event)
+  }
+
+  /**
+   * Abort the stream on a malformed-host condition (e.g. an over-large snapshot):
+   * drop any partial reassembly to free its buffers, then surface `error` to the
+   * async iterator — pending and future `next()` calls reject with it once the
+   * already-delivered queue drains. Terminal and idempotent, like {@link end}.
+   */
+  #fail(error: Error): void {
+    if (this.#ended) return
+    this.#ended = true
+    this.#error = error
+    this.#snapshot = null
+    const pullers = this.#pullers
+    this.#pullers = []
+    for (const pull of pullers) pull.reject(error)
   }
 }
 

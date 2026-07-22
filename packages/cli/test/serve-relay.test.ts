@@ -250,6 +250,29 @@ describe('serve — the outbound relay uplink (leg-P2c §1)', () => {
     expect(inner.writesTo(rec.lastSpawned()).map(dec)).toContain('whoami\n')
   })
 
+  it('refuses custody over the relay (steer-only) while the local socket still spawns', async () => {
+    const { baseDir, cell, dock, issueTicket } = await startDocked()
+    // The local unix socket keeps full custody — a session is spawned through it.
+    const { sessionRef } = await createLocalSession(baseDir)
+
+    const { controller } = await connectController(
+      cell,
+      issueTicket(),
+      dock.hostId,
+      dock.hostPublicKey,
+    )
+    // A relay controller may list + steer the session...
+    const list = await controller.request('sessions.list', {})
+    expect(list.sessions.map((s) => s.sessionRef)).toContain(sessionRef)
+
+    // ...but NOT reserve/claim custody: arbitrary process spawn (attacker-chosen
+    // argv/cwd/env) is never served over the org-scoped relay ticket (H1).
+    await expect(controller.request('custody.reserve', spec)).rejects.toThrow(/unsupported method/)
+    await expect(controller.request('custody.claim', { sessionRef })).rejects.toThrow(
+      /unsupported method/,
+    )
+  })
+
   it('serves ONE registry through both front doors at once (local socket + relay)', async () => {
     const { baseDir, cell, dock, inner, rec, issueTicket } = await startDocked()
     const { sessionRef, local } = await createLocalSession(baseDir)

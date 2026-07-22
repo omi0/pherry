@@ -92,6 +92,62 @@ describe('POST /v1/webhooks/clerk', () => {
     expect(after.json()).toEqual({ hosts: [] })
   })
 
+  it('offboards: membership.deleted for the primary org clears primary_org_id', async () => {
+    const app = await makeTestApp(new Map([[BOB_TOKEN, BOB_EXT]]), { CLERK_WEBHOOK_SECRET: SECRET })
+    await postEvent(app, { type: 'user.created', data: { id: BOB_EXT } })
+    await postEvent(app, { type: 'organization.created', data: { id: ORG_ID, name: 'Bob Inc' } })
+    await postEvent(app, {
+      type: 'organizationMembership.created',
+      data: { organization: { id: ORG_ID }, public_user_data: { user_id: BOB_EXT } },
+    })
+
+    // Primary is set → the human authenticates.
+    const before = await app.app.inject({
+      method: 'GET',
+      url: '/v1/hosts',
+      headers: { authorization: `Bearer ${BOB_TOKEN}` },
+    })
+    expect(before.statusCode).toBe(200)
+
+    const del = await postEvent(app, {
+      type: 'organizationMembership.deleted',
+      data: { organization: { id: ORG_ID }, public_user_data: { user_id: BOB_EXT } },
+    })
+    expect(del.statusCode).toBe(200)
+
+    const rows = await app.db.select().from(users).where(eq(users.clerkUserId, BOB_EXT))
+    expect(rows[0]?.primaryOrgId).toBeNull()
+
+    // Access now follows membership: the human can no longer authenticate.
+    const after = await app.app.inject({
+      method: 'GET',
+      url: '/v1/hosts',
+      headers: { authorization: `Bearer ${BOB_TOKEN}` },
+    })
+    expect(after.statusCode).toBe(401)
+  })
+
+  it('leaves primary_org_id unchanged when a different org membership is deleted', async () => {
+    const app = await makeTestApp(new Map([[BOB_TOKEN, BOB_EXT]]), { CLERK_WEBHOOK_SECRET: SECRET })
+    await postEvent(app, { type: 'user.created', data: { id: BOB_EXT } })
+    await postEvent(app, { type: 'organization.created', data: { id: ORG_ID, name: 'Bob Inc' } })
+    await postEvent(app, {
+      type: 'organizationMembership.created',
+      data: { organization: { id: ORG_ID }, public_user_data: { user_id: BOB_EXT } },
+    })
+
+    // A deletion for some *other* org must not disturb this user's primary tenancy.
+    const otherOrg = 'org_othertest00000000000000000000'
+    const del = await postEvent(app, {
+      type: 'organizationMembership.deleted',
+      data: { organization: { id: otherOrg }, public_user_data: { user_id: BOB_EXT } },
+    })
+    expect(del.statusCode).toBe(200)
+
+    const rows = await app.db.select().from(users).where(eq(users.clerkUserId, BOB_EXT))
+    expect(rows[0]?.primaryOrgId).toBe(ORG_ID)
+  })
+
   it('ignores unknown event types with 200', async () => {
     const app = await makeTestApp(new Map(), { CLERK_WEBHOOK_SECRET: SECRET })
     const res = await postEvent(app, { type: 'session.created', data: { id: 'sess_1' } })

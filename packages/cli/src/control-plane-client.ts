@@ -23,6 +23,12 @@ export interface CliAuthStartResult {
   cliSecret: string
   /** Where to open the browser to sign in — may be relative; see {@link resolveApiUrl}. */
   browserUrl: string
+  /**
+   * The user code to display for a **headless** request (no callback): the human
+   * types it on the approval page so approval is bound to a party who can see this
+   * terminal. `null` for the loopback-callback flow, which needs no code.
+   */
+  userCode: string | null
   /** When the request expires, epoch millis. */
   expiresAt: number
   /** How often to poll `exchange`, in millis. */

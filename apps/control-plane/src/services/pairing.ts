@@ -57,9 +57,16 @@ export async function mintPairToken(
   })
   // The host's static key is stored as standard base64; the QR carries base64url.
   const keyB64Url = Buffer.from(args.host.staticPublicKey, 'base64').toString('base64url')
+  // Percent-encode every query value: a `&`/`?`/`#`/`=` in a URL (director/api) would
+  // otherwise break parsing or inject extra params. Every consumer decodes via
+  // `URL`/`URLSearchParams` (CLI, dashboard) or `URLComponents` (iOS), so encoding here
+  // round-trips cleanly.
   const qrUrl =
-    `pherry://pair?token=${secret.token}&host=${args.host.id}` +
-    `&key=${keyB64Url}&director=${config.directorUrl ?? ''}&api=${config.apiPublicUrl ?? ''}`
+    `pherry://pair?token=${encodeURIComponent(secret.token)}` +
+    `&host=${encodeURIComponent(args.host.id)}` +
+    `&key=${encodeURIComponent(keyB64Url)}` +
+    `&director=${encodeURIComponent(config.directorUrl ?? '')}` +
+    `&api=${encodeURIComponent(config.apiPublicUrl ?? '')}`
   return { pairToken: secret.token, expiresAt, qrUrl }
 }
 

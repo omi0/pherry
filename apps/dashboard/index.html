@@ -3,6 +3,31 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Content-Security-Policy — defense in depth against XSS becoming token theft (a
+      hostile script reading the dev-token bearer out of sessionStorage and exfiltrating
+      it). This one static meta is served by BOTH `vite dev` and the production build, so
+      it must load the Vite HMR bootstrap AND third-party auth (Clerk), whose origins are
+      only known at runtime — hence the "least-bad self-contained" policy below. A
+      hardened deployment should ALSO send a nonce/hash-based CSP over HTTP headers at the
+      edge (which additionally covers frame-ancestors — ignored inside a meta tag).
+        - script-src 'unsafe-inline': `vite dev` injects an inline React-refresh preamble;
+          the production build emits only a self-hosted module script (no inline script).
+          https: lets Clerk hot-load @clerk/clerk-js from its Frontend API.
+        - style-src 'unsafe-inline': Vite injects styles inline in dev, and Clerk injects
+          inline styles at runtime.
+        - connect-src is the exfiltration guard: self, any https (a cross-origin API +
+          Clerk), and localhost over http/ws (the local API default + HMR socket) — but
+          NOT plaintext http/ws to arbitrary external hosts.
+        - object-src 'none', base-uri 'self', form-action 'self': close off the plugin,
+          <base>-hijack, and form-post vectors, none of which depend on runtime origins.
+      The QR in Hosts.tsx is a self-generated uqr SVG injected as markup (not an <img>),
+      so it needs no img-src allowance; img-src https: covers Clerk avatars only.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' https:; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self' https: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; object-src 'none'; base-uri 'self'; form-action 'self'"
+    />
     <title>Pherry</title>
   </head>
   <body>

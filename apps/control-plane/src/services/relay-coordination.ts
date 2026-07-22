@@ -25,10 +25,17 @@ import type { Db } from '../db/client.js'
 import type { Host } from '../db/schema.js'
 import { hosts } from '../db/schema.js'
 import type { RedisLike } from '../redis.js'
+import { sha256Hex } from './auth.js'
 
-/** The Redis key a ticket's routing record lives at. */
+/**
+ * The Redis key a ticket's routing record lives at, addressed by the ticket's
+ * SHA-256 hash. The live ticket is a bearer secret; hashing it into the key means
+ * a reader with `SCAN`/`KEYS` access sees only opaque digests, never a usable
+ * ticket. {@link issueTicket} and {@link consumeTicket} both route through here, so
+ * the SET and the GETDEL stay symmetric.
+ */
 function ticketKey(ticket: string): string {
-  return `relay:tkt:${ticket}`
+  return `relay:tkt:${sha256Hex(ticket)}`
 }
 
 /** The kind of principal a ticket was issued to — a controller device or a human. */
@@ -60,11 +67,19 @@ export interface IssueTicketResult {
   readonly hostPublicKeyB64: string
 }
 
+/** How many times {@link issueTicket} re-mints on an `NX` collision before giving up. */
+const TICKET_MINT_ATTEMPTS = 3
+
 /**
  * Mint a one-time relay ticket routing `principal` to `host` within `org`, recorded
  * in Redis with an `NX` set and a `relayTicketTtlMs` expiry. `NX` guarantees the
  * fresh random ticket never clobbers an existing key; the TTL bounds its life even
  * if it is never consumed.
+ *
+ * A `null` `NX` result means the key was already present — a (vanishingly rare)
+ * collision. We must never hand back a ticket that was **not** stored: its first
+ * consume would spuriously fail. So we re-mint with a fresh ticket, up to
+ * {@link TICKET_MINT_ATTEMPTS} times, and throw only if every attempt collides.
  */
 export async function issueTicket(
   redis: RedisLike,
@@ -76,7 +91,6 @@ export async function issueTicket(
     principal: { kind: TicketPrincipalKind; id: string }
   },
 ): Promise<IssueTicketResult> {
-  const ticket = newTicket()
   const expiresAt = now + config.relayTicketTtlMs
   const value: z.infer<typeof TicketValue> = {
     hostId: args.host.id,
@@ -85,16 +99,23 @@ export async function issueTicket(
     principalId: args.principal.id,
     expiresAt,
   }
-  await redis.set(ticketKey(ticket), JSON.stringify(value), {
-    nx: true,
-    pxMs: config.relayTicketTtlMs,
-  })
-  return {
-    ticket,
-    expiresAt,
-    cellUrl: config.directorUrl ?? null,
-    hostPublicKeyB64: args.host.staticPublicKey,
+  const payload = JSON.stringify(value)
+  for (let attempt = 0; attempt < TICKET_MINT_ATTEMPTS; attempt++) {
+    const ticket = newTicket()
+    const stored = await redis.set(ticketKey(ticket), payload, {
+      nx: true,
+      pxMs: config.relayTicketTtlMs,
+    })
+    if (stored !== null) {
+      return {
+        ticket,
+        expiresAt,
+        cellUrl: config.directorUrl ?? null,
+        hostPublicKeyB64: args.host.staticPublicKey,
+      }
+    }
   }
+  throw new Error('issueTicket: exhausted attempts minting a unique relay ticket')
 }
 
 /** A live, non-revoked host row, or `null` when unknown/revoked. */

@@ -26,14 +26,21 @@ const WEBHOOK_TOLERANCE_MS = 5 * 60 * 1000
  * `null`.
  */
 export function makeClerkIdentity(config: Config): IdentityProvider {
-  const { issuer, jwksUrl, secretKey } = config.clerk
+  const { issuer, jwksUrl, secretKey, audience } = config.clerk
   const jwks = jwksUrl !== undefined ? createRemoteJWKSet(new URL(jwksUrl)) : null
 
   return {
     async verifyHuman(token: string): Promise<{ externalUserId: string } | null> {
       if (jwks === null || issuer === undefined) return null
       try {
-        const { payload } = await jwtVerify(token, jwks, { issuer })
+        // Audience is only enforced when configured — jose rejects a token whose `aud`
+        // does not match (or is absent). Left unset, signature + issuer are all that gate,
+        // which keeps self-hosters who mint audience-less tokens working.
+        const { payload } = await jwtVerify(
+          token,
+          jwks,
+          audience !== undefined ? { issuer, audience } : { issuer },
+        )
         return typeof payload.sub === 'string' ? { externalUserId: payload.sub } : null
       } catch {
         return null

@@ -26,7 +26,7 @@
  *    over the daemon's local path, and a bodiless-`sessionRef` POST binds the raise
  *    to the daemon's latest session.
  */
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SecureChannel, encodeKey, generateKeyPair } from '@pherry/channel'
@@ -334,10 +334,13 @@ describe('the P3a milestone: raise → suppress · quota · route → retrieve, 
       await daemon.request('custody.claim', { sessionRef: reserved.sessionRef })
       daemon.close()
 
+      // The loopback hook gates on the per-daemon secret advertised in its 0600 file.
+      const { secret } = JSON.parse(await readFile(join(baseDir, 'attention-hook.json'), 'utf8'))
+
       // POST with NO sessionRef → the daemon binds it to its latest live session.
       const res = await fetch(`http://127.0.0.1:${handle.attentionHookPort}/`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${secret}` },
         body: JSON.stringify({ kind: 'asks', summary: 'hook needs a human', question: 'go?' }),
       })
       expect(res.status).toBe(200)

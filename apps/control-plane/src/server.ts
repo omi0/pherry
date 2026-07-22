@@ -81,7 +81,11 @@ const HealthResponse = z.object({ ok: z.literal(true) })
  * before use; `main.ts` calls `app.listen`.
  */
 export function buildServer(deps: ServerDeps): FastifyInstance {
-  const app = Fastify({ logger: false })
+  // `trustProxy` decides how `request.ip` is derived from `X-Forwarded-For`. The per-IP
+  // rate limits key on `request.ip`, so behind a proxy this MUST match the real hop count
+  // — otherwise every client collapses into one bucket (or a spoofed header wins). Default
+  // false (trust nothing) for a directly-exposed deploy; set it to the known proxy depth.
+  const app = Fastify({ logger: false, trustProxy: deps.config.trustProxy })
 
   app.decorate('db', deps.db)
   app.decorate('redis', deps.redis)

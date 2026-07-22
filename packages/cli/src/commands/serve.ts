@@ -18,15 +18,20 @@
  * ## The attention hook (P3a)
  *
  * When the daemon is **docked**, it also opens a `127.0.0.1` loopback listener on an
- * ephemeral port and advertises it in `<baseDir>/attention-hook.json` (`0600`,
- * removed on close). It is the v1-proven agent-hook mechanism, trust-by-filesystem
- * exactly like the leg-3c socket: an agent's stop/notification hook POSTs a small
- * JSON body and the daemon maps it → an {@link AttentionEvent} and raises it through
- * the docked credentials — heartbeating the session first, like the CLI `raise`. So
- * a hook is one line:
+ * ephemeral port and advertises it — with a **per-daemon bearer secret** — in
+ * `<baseDir>/attention-hook.json` (`0600`, removed on close). A loopback TCP port
+ * is reachable by *any* local process (unlike the `0700`-confined unix socket), so
+ * trust-by-filesystem is enforced by the secret, not the port: a caller must present
+ * `Authorization: Bearer <secret>` (only a process that can read the `0600` file —
+ * i.e. the same user — holds it). An agent's stop/notification hook POSTs a small
+ * JSON body (capped at {@link MAX_HOOK_BODY_BYTES}) and the daemon maps it → an
+ * {@link AttentionEvent} and raises it through the docked credentials — heartbeating
+ * the session first, like the CLI `raise`. So a hook is one line:
  *
  * ```sh
- * curl -s -X POST "http://127.0.0.1:$(jq -r .port ~/.pherry/attention-hook.json)/" \
+ * hook=~/.pherry/attention-hook.json
+ * curl -s -X POST "http://127.0.0.1:$(jq -r .port "$hook")/" \
+ *   -H "authorization: Bearer $(jq -r .secret "$hook")" \
  *   -d '{"kind":"asks","summary":"needs a decision","question":"ship it?"}'
  * ```
  *
@@ -34,6 +39,7 @@
  * registry, so no RPC is needed). A control-plane failure never crashes the daemon —
  * the local custody path is unaffected. An **undocked** daemon opens nothing.
  */
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { chmod, unlink, writeFile } from 'node:fs/promises'
 import { type IncomingMessage, type ServerResponse, createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -294,7 +300,14 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
             context: relayChannelContext(dock.hostId, ticket),
           })
           channels.add(channel)
-          const served = serveConnection(channel, registry, { custody, listSessions })
+          // Capability split (steer-only over the relay): a relay-bridged
+          // controller may subscribe/input/resize/unsubscribe and list sessions,
+          // but NOT reserve/claim custody. Custody is arbitrary process spawn with
+          // caller-chosen argv/cwd/env; per docs/leg-3c.md it is host-facing and
+          // "the shim/`open` is the only caller" — so it is served on the local
+          // unix socket ONLY (above), never over the org-scoped relay ticket.
+          // Remote spawn for cloud hosts is the separate `sandbox.spawn` method.
+          const served = serveConnection(channel, registry, { listSessions })
           // Same onClose bookkeeping as a local connection.
           channel.onClose(() => {
             served.close()
@@ -389,6 +402,13 @@ export async function stopServe(options: { baseDir?: string } = {}): Promise<Sto
 /** Owner-only mode for the advertised attention-hook port file. */
 const HOOK_FILE_MODE = 0o600
 
+/**
+ * Max request-body size the loopback hook will read, in bytes. A body over this is
+ * refused with `413` and the socket destroyed, so an unauthenticated (pre-`Bearer`)
+ * or hostile local caller cannot grow the daemon's memory without bound.
+ */
+const MAX_HOOK_BODY_BYTES = 64 * 1024
+
 /** A running loopback attention hook. */
 interface AttentionHookHandle {
   /** The `127.0.0.1` port it bound to. */
@@ -424,8 +444,12 @@ async function startAttentionHook(args: {
     ...(args.fetchImpl ? { fetchImpl: args.fetchImpl } : {}),
   })
 
+  // A fresh per-daemon secret gates every request; it is advertised only in the
+  // `0600` port file, so possession of it proves the caller could read that file.
+  const secret = randomBytes(32).toString('hex')
+
   const server = createServer((req, res) => {
-    handleHookRequest(req, res, { client, dock, registry }).catch(() => {
+    handleHookRequest(req, res, { client, dock, registry, secret }).catch(() => {
       // A handler must never reject; if one somehow does, answer rather than crash.
       if (!res.headersSent) sendHookJson(res, 500, { error: 'internal' })
     })
@@ -441,7 +465,7 @@ async function startAttentionHook(args: {
   const port = (server.address() as AddressInfo).port
 
   const path = attentionHookPath(baseDir)
-  await writeFile(path, `${JSON.stringify({ port }, null, 2)}\n`, { mode: HOOK_FILE_MODE })
+  await writeFile(path, `${JSON.stringify({ port, secret }, null, 2)}\n`, { mode: HOOK_FILE_MODE })
   await chmod(path, HOOK_FILE_MODE).catch(() => {})
 
   let closed = false
@@ -468,7 +492,7 @@ async function startAttentionHook(args: {
 async function handleHookRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  ctx: { client: ControlPlaneClient; dock: DockConfig; registry: SessionRegistry },
+  ctx: { client: ControlPlaneClient; dock: DockConfig; registry: SessionRegistry; secret: string },
 ): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1')
   if (req.method !== 'POST' || url.pathname !== '/') {
@@ -476,7 +500,18 @@ async function handleHookRequest(
     return
   }
 
+  // Trust-by-filesystem, enforced by the secret: only a process that could read the
+  // `0600` port file holds it. Refuse (and read no body) before doing any work.
+  if (!hookAuthorized(req, ctx.secret)) {
+    sendHookJson(res, 401, { error: 'unauthorized' })
+    return
+  }
+
   const raw = await readHookBody(req)
+  if (raw === null) {
+    sendHookJson(res, 413, { error: 'body-too-large' })
+    return
+  }
   let payload: unknown
   try {
     payload = raw.length === 0 ? {} : JSON.parse(raw)
@@ -536,14 +571,42 @@ function registryLatest(registry: SessionRegistry): string | undefined {
   return registry.list().at(-1)?.ref
 }
 
-/** Read a request body to a string (empty for a bodiless request). */
-function readHookBody(req: IncomingMessage): Promise<string> {
+/**
+ * Whether `req` carries the hook's `Authorization: Bearer <secret>`. Compared in
+ * constant time; a missing/short/mismatched header fails closed.
+ */
+function hookAuthorized(req: IncomingMessage, secret: string): boolean {
+  const header = req.headers.authorization
+  const prefix = 'Bearer '
+  const provided =
+    typeof header === 'string' && header.startsWith(prefix) ? header.slice(prefix.length) : ''
+  const a = Buffer.from(provided)
+  const b = Buffer.from(secret)
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
+/**
+ * Read a request body to a string (empty for a bodiless request), or `null` if it
+ * exceeds {@link MAX_HOOK_BODY_BYTES}. Bytes past the cap are not buffered (memory
+ * stays bounded), and the request is still drained so the `413` response flushes
+ * cleanly rather than resetting the socket. Only authenticated callers reach here.
+ */
+function readHookBody(req: IncomingMessage): Promise<string | null> {
   return new Promise((resolve) => {
-    let data = ''
-    req.on('data', (chunk) => {
-      data += chunk
+    const chunks: Buffer[] = []
+    let size = 0
+    let overflow = false
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length
+      if (size > MAX_HOOK_BODY_BYTES) {
+        // Stop buffering; keep draining so the response can settle the socket.
+        overflow = true
+        return
+      }
+      if (!overflow) chunks.push(chunk)
     })
-    req.on('end', () => resolve(data))
+    req.on('end', () => resolve(overflow ? null : Buffer.concat(chunks).toString('utf8')))
+    req.on('error', () => resolve(null))
   })
 }
 

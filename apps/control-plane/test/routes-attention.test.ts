@@ -321,6 +321,35 @@ describe('POST /v1/attention — quotas', () => {
     const over = await raise(world, host2.token, evt(s5.sessionRef))
     expect(over.statusCode).toBe(429)
   })
+
+  it('a host over its host limit does not burn the shared org budget', async () => {
+    const world = await seedWorld(
+      { RATE_LIMIT_ATTENTION_HOST_PER_MIN: '1', RATE_LIMIT_ATTENTION_ORG_PER_MIN: '2' },
+      silentChannels(),
+    )
+    const s1 = await seedSession(world.db, { hostId: world.host.id, orgId: world.org.id })
+    const s2 = await seedSession(world.db, { hostId: world.host.id, orgId: world.org.id })
+    const s3 = await seedSession(world.db, { hostId: world.host.id, orgId: world.org.id })
+
+    // Host A's first raise clears both quotas (the org counter reaches 1).
+    expect((await raise(world, world.hostToken, evt(s1.sessionRef))).statusCode).toBe(200)
+    // Two further raises are over host A's own limit → 429 *before* the org counter is
+    // touched. (Under the old both-charged code these would each burn org budget.)
+    expect((await raise(world, world.hostToken, evt(s2.sessionRef))).statusCode).toBe(429)
+    expect((await raise(world, world.hostToken, evt(s3.sessionRef))).statusCode).toBe(429)
+
+    // The org counter reflects only the single successful raise — the rejects never charged it.
+    expect(await world.redis.get(`rl:attention-org:${world.org.id}`)).toBe('1')
+
+    // A sibling host in the same org therefore still has org budget left to spend.
+    const host2 = await seedHost(world.db, {
+      orgId: world.org.id,
+      userId: world.user.id,
+      name: 'h2',
+    })
+    const s4 = await seedSession(world.db, { hostId: host2.host.id, orgId: world.org.id })
+    expect((await raise(world, host2.token, evt(s4.sessionRef))).statusCode).toBe(200)
+  })
 })
 
 describe('POST /v1/attention — validation (400) and session binding (404)', () => {

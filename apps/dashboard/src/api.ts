@@ -75,6 +75,13 @@ export interface CliAuthApproval {
   readonly redirectUrl: string | null
 }
 
+/** `GET /v1/cli/auth/:requestId` — what the approval page needs before approving. */
+export interface CliAuthDescription {
+  readonly requestId: string
+  /** True for a headless request: the approver must enter the CLI's user code. */
+  readonly needsCode: boolean
+}
+
 /**
  * A control-plane request that returned non-2xx. Carries the HTTP `status` and, when
  * the body parsed as the uniform envelope, the server's `code`. The message is the
@@ -108,6 +115,8 @@ export interface DashboardApi {
   listHosts(): Promise<Host[]>
   /** Mint a one-time phone-pairing token for a host. */
   pairHost(hostId: string): Promise<PairMint>
+  /** Revoke a host (idempotent server-side). */
+  revokeHost(hostId: string): Promise<void>
   /** List the org's session metadata. */
   listSessions(): Promise<Session[]>
   /** List the org's devices. */
@@ -118,8 +127,13 @@ export interface DashboardApi {
   listAttention(opts?: { since?: number }): Promise<AttentionRecord[]>
   /** Acknowledge (clear) one attention event; a second ack is a tolerated `404`. */
   ackAttention(id: string): Promise<void>
-  /** Approve a pending CLI-auth request as the signed-in human. */
-  approveCliAuth(requestId: string): Promise<CliAuthApproval>
+  /** Describe a pending CLI-auth request (whether it needs a user code). */
+  describeCliAuth(requestId: string): Promise<CliAuthDescription>
+  /**
+   * Approve a pending CLI-auth request as the signed-in human. A headless request
+   * requires `userCode` — the code shown in the CLI's terminal.
+   */
+  approveCliAuth(requestId: string, userCode?: string): Promise<CliAuthApproval>
 }
 
 /** Options for {@link createApi}: the base URL, the token source, and an optional `fetch`. */
@@ -155,6 +169,9 @@ export function createApi(opts: CreateApiOptions): DashboardApi {
     me: () => request<Me>('GET', '/v1/me'),
     listHosts: async () => (await request<{ hosts: Host[] }>('GET', '/v1/hosts')).hosts,
     pairHost: (hostId) => request<PairMint>('POST', `/v1/hosts/${encodeURIComponent(hostId)}/pair`),
+    revokeHost: async (hostId) => {
+      await request('DELETE', `/v1/hosts/${encodeURIComponent(hostId)}`)
+    },
     listSessions: async () =>
       (await request<{ sessions: Session[] }>('GET', '/v1/sessions')).sessions,
     listDevices: async () => (await request<{ devices: Device[] }>('GET', '/v1/devices')).devices,
@@ -171,8 +188,13 @@ export function createApi(opts: CreateApiOptions): DashboardApi {
     ackAttention: async (id) => {
       await request('POST', `/v1/attention/${encodeURIComponent(id)}/ack`)
     },
-    approveCliAuth: (requestId) =>
-      request<CliAuthApproval>('POST', '/v1/cli/auth/approve', { requestId }),
+    describeCliAuth: (requestId) =>
+      request<CliAuthDescription>('GET', `/v1/cli/auth/${encodeURIComponent(requestId)}`),
+    approveCliAuth: (requestId, userCode) =>
+      request<CliAuthApproval>('POST', '/v1/cli/auth/approve', {
+        requestId,
+        ...(userCode !== undefined ? { userCode } : {}),
+      }),
   }
 }
 

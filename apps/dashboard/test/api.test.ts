@@ -87,6 +87,13 @@ describe('createApi — request shaping', () => {
     expect(calls[0]?.url).toBe('https://cp.example.com/v1/hosts/host%20a%2Fb/pair')
   })
 
+  it('revokeHost → DELETE /v1/hosts/:id with the id path-encoded', async () => {
+    const { api, calls } = makeApi(jsonResponse({ ok: true }))
+    await api.revokeHost('host a/b')
+    expect(calls[0]?.method).toBe('DELETE')
+    expect(calls[0]?.url).toBe('https://cp.example.com/v1/hosts/host%20a%2Fb')
+  })
+
   it('listSessions → GET /v1/sessions, unwrapping .sessions', async () => {
     const { api, calls } = makeApi(jsonResponse({ sessions: [] }))
     await api.listSessions()

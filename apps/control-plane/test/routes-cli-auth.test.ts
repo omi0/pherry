@@ -17,13 +17,21 @@ const start = (world: World, callback?: string, ip?: string) =>
     ...(ip !== undefined ? { remoteAddress: ip } : {}),
   })
 
-const approve = (world: World, token: string | undefined, requestId: string) =>
+const approve = (
+  world: World,
+  token: string | undefined,
+  requestId: string,
+  userCode?: string | null,
+) =>
   world.app.inject({
     method: 'POST',
     url: '/v1/cli/auth/approve',
     ...(token !== undefined ? { headers: { authorization: `Bearer ${token}` } } : {}),
-    payload: { requestId },
+    payload: userCode ? { requestId, userCode } : { requestId },
   })
+
+const describe_ = (world: World, requestId: string) =>
+  world.app.inject({ method: 'GET', url: `/v1/cli/auth/${requestId}` })
 
 const exchange = (
   world: World,
@@ -108,15 +116,17 @@ describe('cli-auth loopback flow', () => {
 })
 
 describe('cli-auth headless flow', () => {
-  it('start (no callback) → exchange pending → approve (null redirect) → exchange ok', async () => {
+  it('start (no callback) → exchange pending → approve with user code (null redirect) → exchange ok', async () => {
     const world = await seedWorld()
     const s = (await start(world)).json()
+    // A headless request carries a display user code the approver must echo back.
+    expect(s.userCode).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}$/)
 
     const pending = await exchange(world, { requestId: s.requestId, cliSecret: s.cliSecret })
     expect(pending.statusCode).toBe(200)
     expect(pending.json()).toEqual({ status: 'pending' })
 
-    const approved = await approve(world, world.humanToken, s.requestId)
+    const approved = await approve(world, world.humanToken, s.requestId, s.userCode)
     expect(approved.statusCode).toBe(200)
     expect(approved.json()).toEqual({ ok: true, redirectUrl: null })
 
@@ -124,6 +134,63 @@ describe('cli-auth headless flow', () => {
     expect(ok.statusCode).toBe(200)
     expect(ok.json().status).toBe('ok')
     expect(ok.json().token).toMatch(/^ct_[0-9a-f]{40}$/)
+  })
+
+  it('a callback request carries no user code (bound to loopback instead)', async () => {
+    const world = await seedWorld()
+    const s = (await start(world, 'http://127.0.0.1:8765/cb')).json()
+    expect(s.userCode).toBeNull()
+    // …and approve needs no code.
+    expect((await approve(world, world.humanToken, s.requestId)).statusCode).toBe(200)
+  })
+
+  it('headless approve WITHOUT the user code → 404 (anti-phishing), grant never written', async () => {
+    const world = await seedWorld()
+    const s = (await start(world)).json()
+
+    const noCode = await approve(world, world.humanToken, s.requestId)
+    expect(noCode.statusCode).toBe(404)
+    expect(noCode.json().error.code).toBe('cli-auth-invalid')
+
+    // No grant was written, so the CLI still sees pending (not a leaked token).
+    const poll = await exchange(world, { requestId: s.requestId, cliSecret: s.cliSecret })
+    expect(poll.json()).toEqual({ status: 'pending' })
+
+    // The correct code still approves afterwards.
+    expect((await approve(world, world.humanToken, s.requestId, s.userCode)).statusCode).toBe(200)
+  })
+
+  it('headless approve with the WRONG code → 404; the request is invalidated after the attempt budget', async () => {
+    const world = await seedWorld()
+    const s = (await start(world)).json()
+
+    // Burn the whole attempt budget (5) with wrong codes.
+    for (let i = 0; i < 5; i++) {
+      const bad = await approve(world, world.humanToken, s.requestId, 'ZZZZ-ZZZZ')
+      expect(bad.statusCode).toBe(404)
+    }
+
+    // The request is now invalidated — even the correct code no longer approves.
+    const real = await approve(world, world.humanToken, s.requestId, s.userCode)
+    expect(real.statusCode).toBe(404)
+    expect(real.json().error.code).toBe('cli-auth-invalid')
+  })
+
+  it('describe (GET /v1/cli/auth/:id) reports needsCode true for headless, false for callback, 404 unknown', async () => {
+    const world = await seedWorld()
+    const headless = (await start(world)).json()
+    const callback = (await start(world, 'http://127.0.0.1:8765/cb')).json()
+
+    const h = await describe_(world, headless.requestId)
+    expect(h.statusCode).toBe(200)
+    expect(h.json()).toEqual({ requestId: headless.requestId, needsCode: true })
+
+    const c = await describe_(world, callback.requestId)
+    expect(c.json()).toEqual({ requestId: callback.requestId, needsCode: false })
+
+    const unknown = await describe_(world, 'car_unknown')
+    expect(unknown.statusCode).toBe(404)
+    expect(unknown.json().error.code).toBe('cli-auth-invalid')
   })
 })
 
@@ -162,7 +229,7 @@ describe('cli-auth refusal matrix (all 404 cli-auth-invalid, undifferentiated)',
   it('exchange with the wrong cliSecret → 404 (and never burns the grant)', async () => {
     const world = await seedWorld()
     const s = (await start(world)).json()
-    await approve(world, world.humanToken, s.requestId)
+    await approve(world, world.humanToken, s.requestId, s.userCode)
 
     const wrong = await exchange(world, { requestId: s.requestId, cliSecret: 'cas_wrongwrong' })
     expect(wrong.statusCode).toBe(404)
@@ -222,7 +289,7 @@ describe('cli-auth refusal matrix (all 404 cli-auth-invalid, undifferentiated)',
   it('a second exchange after success → 404 (one-time, the GETDEL proof)', async () => {
     const world = await seedWorld()
     const s = (await start(world)).json()
-    await approve(world, world.humanToken, s.requestId)
+    await approve(world, world.humanToken, s.requestId, s.userCode)
 
     const first = await exchange(world, { requestId: s.requestId, cliSecret: s.cliSecret })
     expect(first.json().status).toBe('ok')
@@ -235,8 +302,8 @@ describe('cli-auth refusal matrix (all 404 cli-auth-invalid, undifferentiated)',
   it('approving twice → 404 (one-time)', async () => {
     const world = await seedWorld()
     const s = (await start(world)).json()
-    expect((await approve(world, world.humanToken, s.requestId)).statusCode).toBe(200)
-    const second = await approve(world, world.humanToken, s.requestId)
+    expect((await approve(world, world.humanToken, s.requestId, s.userCode)).statusCode).toBe(200)
+    const second = await approve(world, world.humanToken, s.requestId, s.userCode)
     expect(second.statusCode).toBe(404)
     expect(second.json().error.code).toBe('cli-auth-invalid')
   })
@@ -273,7 +340,7 @@ describe('cli-auth principals never cross', () => {
   it('a ct_ token does not authenticate the host API (POST /v1/host/heartbeat) → 401', async () => {
     const world = await seedWorld()
     const s = (await start(world)).json()
-    await approve(world, world.humanToken, s.requestId)
+    await approve(world, world.humanToken, s.requestId, s.userCode)
     const token = (await exchange(world, { requestId: s.requestId, cliSecret: s.cliSecret })).json()
       .token as string
 
@@ -293,7 +360,7 @@ describe('cli-auth ct_ token expiry', () => {
   it('works, then 401s once past cliTokenTtlMs', async () => {
     const world = await seedWorld()
     const s = (await start(world)).json()
-    await approve(world, world.humanToken, s.requestId)
+    await approve(world, world.humanToken, s.requestId, s.userCode)
     const token = (await exchange(world, { requestId: s.requestId, cliSecret: s.cliSecret })).json()
       .token as string
 

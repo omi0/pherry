@@ -125,6 +125,17 @@ export function verifyProof(
   return constantTimeEqual(expected, mac)
 }
 
+/**
+ * Best-effort zero-fill of a challenge's ephemeral **secret**, called once the
+ * proof has been verified and the challenge is no longer needed. Like the channel
+ * handshake's ephemeral hygiene this is **best-effort** — JS gives no guaranteed
+ * erasure — it only narrows the window in which the raw ephemeral lingers on the
+ * heap. After this the challenge can no longer answer a proof; drop the reference.
+ */
+export function wipeChallenge(challenge: HostChallengeSecret): void {
+  challenge.cellEphemeralSecret.fill(0)
+}
+
 /** Derive the MAC from the shared secret and the bound transcript. */
 function computeMac(dh: Uint8Array, hostId: string, challenge: HostChallenge): Uint8Array {
   const key = hkdf(sha256, dh, challenge.nonce, PROOF_INFO, RELAY_FIELD_BYTES)

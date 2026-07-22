@@ -9,7 +9,7 @@
  * file is unlinked before listening, and removed again on close) and nothing else
  * — no framing, no crypto, no protocol.
  */
-import { unlink } from 'node:fs/promises'
+import { chmod, unlink } from 'node:fs/promises'
 import { type Socket, createConnection, createServer } from 'node:net'
 import type { Duplex } from '@pherry/channel'
 import { nodeSocketDuplex } from './node-socket.js'
@@ -42,6 +42,13 @@ export async function listenUnix(
       resolve()
     })
   })
+
+  // Defense-in-depth: restrict the socket file to its owner (0600) so who may
+  // connect does not rest solely on the parent dir being 0700. The file only
+  // exists once `listen` has resolved, so chmod here. On a platform that does not
+  // enforce unix-socket permissions the chmod may fail or no-op; that must not
+  // crash the daemon (the 0700 dir still gates access), so a failure is swallowed.
+  await chmod(path, 0o600).catch(() => {})
 
   let closed = false
   return {

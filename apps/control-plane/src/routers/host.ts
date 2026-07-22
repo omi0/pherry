@@ -22,8 +22,17 @@ const SessionReport = z.object({
   endedAt: z.number().int().nonnegative().optional(),
 })
 
+/**
+ * Cap on session reports accepted in one heartbeat — bounds the per-request insert
+ * loop and body size. A host with more live sessions than this is well past any
+ * realistic fan-out; an oversized batch fails body validation (`400`).
+ */
+const MAX_HEARTBEAT_SESSIONS = 100
+
 /** `POST /v1/host/heartbeat` body: an optional batch of session-metadata reports. */
-const HeartbeatBody = z.object({ sessions: z.array(SessionReport).optional() })
+const HeartbeatBody = z.object({
+  sessions: z.array(SessionReport).max(MAX_HEARTBEAT_SESSIONS).optional(),
+})
 
 /** Register the host-credential-authenticated API onto `app`. */
 export async function hostRoutes(app: FastifyInstance): Promise<void> {

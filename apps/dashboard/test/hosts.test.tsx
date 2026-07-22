@@ -51,6 +51,37 @@ describe('HostsView', () => {
     expect(screen.queryByRole('button', { name: 'Pair phone' })).toBeNull()
   })
 
+  it('revokes a host through an inline confirm, then refreshes', async () => {
+    const listHosts = vi.fn().mockResolvedValue([host({ id: 'h1', name: 'box' })])
+    const revokeHost = vi.fn().mockResolvedValue(undefined)
+    renderWithProviders(<HostsView />, { api: makeFakeApi({ listHosts, revokeHost }) })
+
+    await screen.findByText('box')
+
+    // First click reveals the confirm step, not an immediate delete.
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke' }))
+    expect(screen.getByText('Revoke?')).toBeDefined()
+    expect(revokeHost).not.toHaveBeenCalled()
+
+    // Confirm deletes and refreshes the list.
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(revokeHost).toHaveBeenCalledWith('h1'))
+    await waitFor(() => expect(listHosts).toHaveBeenCalledTimes(2))
+  })
+
+  it('cancels the host revoke without deleting', async () => {
+    const listHosts = vi.fn().mockResolvedValue([host({ id: 'h1', name: 'box' })])
+    const revokeHost = vi.fn().mockResolvedValue(undefined)
+    renderWithProviders(<HostsView />, { api: makeFakeApi({ listHosts, revokeHost }) })
+
+    await screen.findByText('box')
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(screen.queryByText('Revoke?')).toBeNull()
+    expect(revokeHost).not.toHaveBeenCalled()
+  })
+
   it('opens the pair modal with a QR svg and the pherry:// link', async () => {
     const now = Date.now()
     const listHosts = vi

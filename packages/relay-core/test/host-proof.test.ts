@@ -1,6 +1,12 @@
 import { generateKeyPair } from '@pherry/channel'
 import { describe, expect, it } from 'vitest'
-import { type HostChallengeSecret, makeChallenge, proveHost, verifyProof } from '../src/index.js'
+import {
+  type HostChallengeSecret,
+  makeChallenge,
+  proveHost,
+  verifyProof,
+  wipeChallenge,
+} from '../src/index.js'
 
 const HOST_ID = 'host_alpha'
 const CELL_ID = 'cell_one'
@@ -67,6 +73,13 @@ describe('host proof', () => {
       }
       expect(verifyProof(tampered, HOST_ID, host.publicKey, mac)).toBe(false)
     })
+  })
+
+  it('wipeChallenge zero-fills the ephemeral secret (best-effort hygiene)', () => {
+    const challenge = makeChallenge(CELL_ID)
+    expect(challenge.cellEphemeralSecret.some((b) => b !== 0)).toBe(true)
+    wipeChallenge(challenge)
+    expect([...challenge.cellEphemeralSecret].every((b) => b === 0)).toBe(true)
   })
 
   it('a truncated / wrong-length MAC is rejected (constant-time compare returns false)', () => {
