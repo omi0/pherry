@@ -19,7 +19,7 @@ settings:
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "6.0"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
-    DEVELOPMENT_TEAM: ""
+    DEVELOPMENT_TEAM: YOURTEAMID
     CODE_SIGN_STYLE: Automatic
 
 packages:
@@ -57,6 +57,9 @@ targets:
           - voip
           - remote-notification
         NSCameraUsageDescription: Pherry scans a pairing QR to dock a host.
+        # The local dev loop reaches a control plane + relay on your Mac's LAN IP;
+        # iOS asks the user for local-network permission the first time.
+        NSLocalNetworkUsageDescription: Pherry connects to your own control plane and relay on this network.
         ITSAppUsesNonExemptEncryption: false
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

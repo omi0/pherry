@@ -159,7 +159,9 @@ phone rings full-screen → answer opens the session. Devices register tokens vi
 `POST /v1/device/push-tokens` (`dt_` only; migration `0002` adds `voip_push_token`); a dead token
 (APNs `410`/`BadDeviceToken`) self-heals by clearing exactly that column. Blank APNs config degrades
 to the P3a logging stubs; no test ever hits APNs (`FakePushSender`). Real-device ringing needs Apple
-credentials + a physical iPhone (see `ios/README.md` + `docs/deploying.md` APNs).
+credentials + a physical iPhone (see `ios/README.md` + `docs/deploying.md` APNs). **Proven live**
+(2026-07-22, iPhone 13 / iOS 18.7, APNs sandbox): QR pair → both tokens registered → raise
+`--urgency call` → full-screen CallKit ring → answer opened the session and one-time-acked the event.
 
 **Next: P3d** voice worker (LiveKit room behind the ring channel) · **P4** cloud sandboxes.
 Continuing an in-flight phase? Read [`docs/HANDOFF.md`](./docs/HANDOFF.md) — state, seams, and the

@@ -68,6 +68,11 @@ final class AppModel {
         calls.onAnswer = { [weak self] call in
             self?.answer(call)
         }
+        // The PushKit VoIP token rides to the registrar, which buffers it until a credential
+        // exists — without this wire the ring channel never learns the phone's token.
+        calls.onVoipToken = { [weak self] token in
+            self?.push.receiveVoipToken(token)
+        }
     }
 
     /// Wire the live services once the UI is up: point the inbox at the credential, register push,
