@@ -1,6 +1,7 @@
 node_modules/
 dist/
 coverage/
+.dev/
 protocol/schema/
 *.tsbuildinfo
 *.log

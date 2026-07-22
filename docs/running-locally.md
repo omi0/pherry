@@ -33,6 +33,17 @@ For the design, read [`ARCHITECTURE.md`](./ARCHITECTURE.md) and
   `node:sqlite` (Node ≥ 22.5); the host toolchain is Node 20+.
 - A repo install: `pnpm install` from the root.
 
+## The fast path: `make up`
+
+`make bootstrap` once (pnpm install), then **`make up`** stands the whole stack up in
+one command: it starts Postgres + Redis (adopting them if they are already running,
+never touching a stranger on their ports), applies the migrations, seeds the dev
+tenant when `DEV_HUMAN_TOKEN` is set, and runs the control plane (:3000), relay
+(:9443), and dashboard (:5173) as background daemons — then prints a status table and
+the next steps. `make status` reports honest health, `make logs` tails the daemons,
+and `make down` stops everything (volumes preserved). The numbered sections below are
+the same steps by hand — reach for them when a piece misbehaves.
+
 ---
 
 ## 1. Backing services
