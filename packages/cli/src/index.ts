@@ -53,6 +53,13 @@ export {
   removeFromAnchoredList,
   removeFromBoardedList,
 } from './custody/boarded.js'
+export {
+  RC_BLOCK_CLOSE,
+  RC_BLOCK_OPEN,
+  ensureShimsOnShellPath,
+  removeShimsFromShellPath,
+} from './custody/shell-rc.js'
+export type { EnsureRcResult, RemoveRcResult, ShellRcOptions } from './custody/shell-rc.js'
 export { runAnchor, runBoard, runUnboard } from './commands/board.js'
 export type {
   AnchorOptions,

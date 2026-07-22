@@ -38,7 +38,8 @@ const USAGE = `pherry — steer your coding agents from your phone
 Usage:
   pherry dock [--api <url>] [--token <tok>]
                                     sign in, register this host, pair your phone
-  pherry board [<repo>]             install PATH shims so agents launch under custody
+  pherry board [<repo>] [--no-rc]   install PATH shims so agents launch under custody
+                                    (wires them into your shell rc; --no-rc skips that)
   pherry anchor [<repo>]            soft brake: stop custodying new launches here
   pherry unboard [<repo>]           remove the shims / custody entirely
   pherry sessions                   list the daemon's live sessions
@@ -154,18 +155,32 @@ async function dockCommand(args: string[]): Promise<number> {
 }
 
 async function boardCommand(args: string[]): Promise<number> {
-  const { positionals } = parseArgs({ args, allowPositionals: true, options: {} })
+  const { positionals, values } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: { 'no-rc': { type: 'boolean' } },
+  })
   const repo = positionals[0]
   const result = await runBoard({
     ...baseDirOption(),
     ...(repo ? { cwd: repo } : {}),
+    rc: values['no-rc'] !== true,
     pherryCommand: await bakedPherryCommand(),
   })
 
   process.stdout.write(`pherry: boarded ${result.repo}\n`)
   process.stdout.write(`pherry: wrote ${result.shims.length} shim(s) to ${shimsDirOf(result)}\n`)
+  if (result.rc?.kind === 'written') {
+    process.stdout.write(
+      `pherry: put the shims on PATH via ${result.rc.rcPath} (new terminals pick this up)\n`,
+    )
+  }
   if (result.pathHint) {
-    process.stdout.write('pherry: add this to your shell rc so the shims are found first:\n')
+    if (result.rc?.kind === 'unsupported') {
+      process.stdout.write('pherry: add this to your shell rc so the shims are found first:\n')
+    } else {
+      process.stdout.write('pherry: this shell predates the rc change — for it, run:\n')
+    }
     process.stdout.write(`  ${result.pathHint}\n`)
   }
   if ((await livePid(baseDirOption().baseDir)) === null) {
@@ -187,7 +202,11 @@ async function anchorCommand(args: string[]): Promise<number> {
 async function unboardCommand(args: string[]): Promise<number> {
   const { positionals } = parseArgs({ args, allowPositionals: true, options: {} })
   const repo = positionals[0]
-  const result = await runUnboard({ ...baseDirOption(), ...(repo ? { cwd: repo } : {}) })
+  const result = await runUnboard({
+    ...baseDirOption(),
+    ...(repo ? { cwd: repo } : {}),
+    rc: true,
+  })
   if (!result.wasBoarded) {
     process.stdout.write(`pherry: ${result.repo} was not boarded\n`)
     return 0
@@ -195,6 +214,8 @@ async function unboardCommand(args: string[]): Promise<number> {
   process.stdout.write(`pherry: unboarded ${result.repo}\n`)
   if (result.shimsRemoved)
     process.stdout.write('pherry: removed the shims (no boarded repos remain)\n')
+  if (result.rc?.kind === 'removed')
+    process.stdout.write(`pherry: removed the PATH block from ${result.rc.rcPath}\n`)
   return 0
 }
 

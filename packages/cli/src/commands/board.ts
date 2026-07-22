@@ -26,6 +26,13 @@ import {
   removeFromAnchoredList,
   removeFromBoardedList,
 } from '../custody/boarded.js'
+import {
+  type EnsureRcResult,
+  type RemoveRcResult,
+  type ShellRcOptions,
+  ensureShimsOnShellPath,
+  removeShimsFromShellPath,
+} from '../custody/shell-rc.js'
 import { renderShimScript } from '../custody/shim.js'
 import { defaultHostKeyDir } from '../host-key.js'
 import { shimsDir } from '../paths.js'
@@ -43,6 +50,15 @@ export interface BoardOptions {
   pherryCommand?: string
   /** The `PATH` to test for the shim dir. Defaults to `process.env.PATH`. */
   pathEnv?: string
+  /**
+   * Whether to wire the shims into the user's shell rc (the managed block —
+   * see `custody/shell-rc.ts`). Defaults to `false` at this library level so no
+   * embedder or test ever writes outside `baseDir` by surprise; the `pherry`
+   * bin passes `true` (its `--no-rc` flag opts back out).
+   */
+  rc?: boolean
+  /** Shell-rc environment overrides (home / shell / zdotdir), injected for tests. */
+  rcEnv?: Omit<ShellRcOptions, 'baseDir'>
 }
 
 /** The outcome of {@link runBoard}. */
@@ -52,10 +68,13 @@ export interface BoardResult {
   /** The absolute paths of the shim files written (one per known agent). */
   shims: string[]
   /**
-   * The line to add to the user's shell rc to put the shims on `PATH` — present
-   * only when the shim dir is not already an exact entry of `pathEnv`.
+   * The line that puts the shims on `PATH` **in the current shell** — present
+   * only when the shim dir is not already an exact entry of `pathEnv`. An rc
+   * edit (below) only reaches new terminals, so this hint stays independent.
    */
   pathHint?: string
+  /** What the shell-rc wiring did (absent when `rc: false` was passed). */
+  rc?: EnsureRcResult
 }
 
 /** Options for {@link runUnboard}. */
@@ -64,6 +83,14 @@ export interface UnboardOptions {
   cwd?: string
   /** Pherry home dir override (tests). Defaults to `~/.pherry`. */
   baseDir?: string
+  /**
+   * Whether to strip the shell-rc block when the shims are removed. Defaults to
+   * `false` at this library level (no surprise writes outside `baseDir`); the
+   * `pherry` bin passes `true`.
+   */
+  rc?: boolean
+  /** Shell-rc environment overrides (home / shell / zdotdir), injected for tests. */
+  rcEnv?: Omit<ShellRcOptions, 'baseDir'>
 }
 
 /** The outcome of {@link runUnboard}. */
@@ -74,6 +101,8 @@ export interface UnboardResult {
   wasBoarded: boolean
   /** Whether the shims were removed (only when the last boarded repo was dropped). */
   shimsRemoved: boolean
+  /** What the shell-rc cleanup did (present only when the shims were removed). */
+  rc?: RemoveRcResult
 }
 
 /** Options for {@link runAnchor}. */
@@ -133,11 +162,19 @@ export async function runBoard(options: BoardOptions = {}): Promise<BoardResult>
   // Boarding reverts an anchor — this is how `anchor` is undone.
   await removeFromAnchoredList(repo, baseDir)
 
+  // Wire the rc (idempotent) when asked; the current-shell hint stays
+  // separate because an rc edit only reaches terminals opened after it.
+  const rc =
+    options.rc === true
+      ? await ensureShimsOnShellPath({ baseDir, ...(options.rcEnv ?? {}) })
+      : undefined
+
   const onPath = pathEntries(pathEnv).includes(dir)
   return {
     repo,
     shims,
     ...(onPath ? {} : { pathHint: `export PATH="${dir}:$PATH"` }),
+    ...(rc !== undefined ? { rc } : {}),
   }
 }
 
@@ -154,6 +191,7 @@ export async function runUnboard(options: UnboardOptions = {}): Promise<UnboardR
   await removeFromAnchoredList(repo, baseDir)
 
   let shimsRemoved = false
+  let rc: RemoveRcResult | undefined
   const remaining = await readBoardedList(baseDir)
   if (remaining.length === 0) {
     const dir = shimsDir(baseDir)
@@ -163,9 +201,13 @@ export async function runUnboard(options: UnboardOptions = {}): Promise<UnboardR
     // Best-effort: only succeeds if nothing else lives in the dir.
     await rmdir(dir).catch(() => {})
     shimsRemoved = true
+    // The shims are gone, so the rc block pointing at them goes too.
+    if (options.rc === true) {
+      rc = await removeShimsFromShellPath({ baseDir, ...(options.rcEnv ?? {}) })
+    }
   }
 
-  return { repo, wasBoarded, shimsRemoved }
+  return { repo, wasBoarded, shimsRemoved, ...(rc !== undefined ? { rc } : {}) }
 }
 
 /**
