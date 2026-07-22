@@ -9,7 +9,7 @@
 #   docker compose down         # stop them (add -v to also drop the volumes)
 #
 # Ports are shifted off the defaults where a native install commonly squats:
-# Postgres is published on host 5433 (→ container 5432); Redis on 6379.
+# Postgres is published on host 5334 (→ container 5432); Redis on 6379.
 
 services:
   postgres:
@@ -19,7 +19,7 @@ services:
       POSTGRES_USER: pherry
       POSTGRES_PASSWORD: pherry
     ports:
-      - '5433:5432'
+      - '5334:5432'
     volumes:
       - pherry-postgres:/var/lib/postgresql/data
     healthcheck:

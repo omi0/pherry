@@ -17,7 +17,7 @@ For the design, read [`ARCHITECTURE.md`](./ARCHITECTURE.md) and
         │  registers / tickets                                      │  ticket + attach
         └──────────────────────►  control plane (:3000)  ◄──────────┘
                                    │              │
-                              Postgres (:5433)  Redis (:6379)   ← docker compose
+                              Postgres (:5334)  Redis (:6379)   ← docker compose
 ```
 
 - **Postgres + Redis** come from `docker-compose.yml` (dev only).
@@ -38,15 +38,15 @@ For the design, read [`ARCHITECTURE.md`](./ARCHITECTURE.md) and
 ## 1. Backing services
 
 ```bash
-docker compose up -d          # postgres on :5433, redis on :6379
+docker compose up -d          # postgres on :5334, redis on :6379
 docker compose ps             # both should read "healthy"
 ```
 
-This gives you a `pherry`/`pherry`/`pherry` database on host port **5433** (shifted
+This gives you a `pherry`/`pherry`/`pherry` database on host port **5334** (shifted
 off 5432 to dodge a native Postgres) and Redis on **6379**. Data lives in named
 volumes; `docker compose down` stops the containers (add `-v` to wipe the volumes).
 
-> If port 5433 or 6379 is already taken (e.g. another project's Redis), see
+> If port 5334 or 6379 is already taken (e.g. another project's Redis), see
 > [Troubleshooting](#troubleshooting) — pick the conflict apart before continuing.
 
 ## 2. Configure
@@ -75,7 +75,7 @@ the committed `drizzle/` migrations once:
 ```bash
 # Uses the db:migrate script (tsx). DATABASE_URL must be provided inline (tsx does
 # not read .env):
-DATABASE_URL=postgres://pherry:pherry@localhost:5433/pherry \
+DATABASE_URL=postgres://pherry:pherry@localhost:5334/pherry \
   pnpm --filter @pherry/control-plane db:migrate
 
 # …or, after a build, with the .env file:
@@ -113,7 +113,7 @@ docker build -f apps/control-plane/Dockerfile -t pherry-control-plane .
 docker build -f apps/relay/Dockerfile          -t pherry-relay .
 
 docker run --rm -p 3000:3000 \
-  -e DATABASE_URL=postgres://pherry:pherry@host.docker.internal:5433/pherry \
+  -e DATABASE_URL=postgres://pherry:pherry@host.docker.internal:5334/pherry \
   -e REDIS_URL=redis://host.docker.internal:6379 \
   -e INTERNAL_API_KEY=dev-internal-key \
   -e DIRECTOR_URL=tcp://127.0.0.1:9443 \
@@ -147,7 +147,7 @@ DEV_HUMAN_TOKEN=dev-token-alice
 DASHBOARD_URL=http://localhost:5173
 
 # 2. Seed the org + user the dev token maps to (idempotent):
-DATABASE_URL=postgres://pherry:pherry@localhost:5433/pherry \
+DATABASE_URL=postgres://pherry:pherry@localhost:5334/pherry \
   pnpm --filter @pherry/control-plane db:seed-dev
 
 # 3. Restart the control plane (it logs a loud DEV warning), then start the dashboard:
@@ -209,7 +209,7 @@ the two rows by hand. You need your **Clerk user id** (the JWT `sub`, `user_…`
 it in the Clerk dashboard under Users, or decode a token's `sub`).
 
 ```bash
-psql postgres://pherry:pherry@localhost:5433/pherry <<'SQL'
+psql postgres://pherry:pherry@localhost:5334/pherry <<'SQL'
 INSERT INTO orgs (id, name) VALUES ('org_local', 'Local Dev')
   ON CONFLICT (id) DO NOTHING;
 INSERT INTO users (id, clerk_user_id, primary_org_id)
@@ -301,7 +301,7 @@ clean.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `docker compose up` fails to bind **5433** | A native Postgres or another project owns it | Free it, or `docker compose ps -a` to find the squatter; the compose value is fixed by design (change your other service). |
+| `docker compose up` fails to bind **5334** | A native Postgres or another project owns it | Free it, or `docker compose ps -a` to find the squatter; the compose value is fixed by design (change your other service). |
 | `docker compose up` fails to bind **6379** | Another project's Redis container is already published on 6379 | Stop it (`docker ps` → `docker stop <id>`), or point the control plane's `REDIS_URL` at that Redis if it's disposable. |
 | `curl localhost:3000/healthz` refused | Control plane not running, or DB/Redis unreachable | Start it; check `DATABASE_URL`/`REDIS_URL` reach the compose ports; re-run the migration. |
 | `dock` / `attach` returns **401** | Unseeded user, wrong Clerk id, or an expired JWT | Confirm the `users` row's `clerk_user_id` matches the token `sub` and `primary_org_id` is set; fetch a **fresh** `getToken()` (they expire in ~60s). |
