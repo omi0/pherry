@@ -3,7 +3,8 @@
  * (§3 step 1). Three JSON routes plus one HTML page:
  *
  * - `POST /v1/cli/auth/start` (no auth, rate-limited per IP) — begin a request.
- * - `GET /cli/auth/:requestId` (no auth) — the minimal browser approval page.
+ * - `GET /cli/auth/:requestId` (no auth) — the minimal browser approval page, or a
+ *   302 to the dashboard's `/cli-auth/:id` when `DASHBOARD_URL` is configured.
  * - `POST /v1/cli/auth/approve` (**human** bearer) — approve a pending request.
  * - `POST /v1/cli/auth/exchange` (no auth, rate-limited per IP) — poll/redeem for a
  *   `ct_` human token.
@@ -139,11 +140,17 @@ export async function cliAuthRoutes(app: FastifyInstance): Promise<void> {
     return StartResponse.parse(result)
   })
 
-  // GET /cli/auth/:requestId — the minimal browser approval page (404 HTML if unknown/expired).
+  // GET /cli/auth/:requestId — the browser approval entrypoint. An unknown/expired
+  // request is always the 404 HTML. For a live request: 302 to the dashboard's
+  // approval page when DASHBOARD_URL is set, else the minimal P2c HTML page.
   app.get<{ Params: { requestId: string } }>('/cli/auth/:requestId', async (request, reply) => {
     const live = await describeCliAuthRequest(app.redis, app.now(), request.params.requestId)
     if (live === null) {
       return reply.status(404).type('text/html').send(notFoundPage())
+    }
+    const dashboardUrl = app.appConfig.dashboardUrl
+    if (dashboardUrl !== undefined) {
+      return reply.redirect(`${dashboardUrl}/cli-auth/${live.requestId}`, 302)
     }
     return reply.type('text/html').send(approvalPage(live.requestId))
   })

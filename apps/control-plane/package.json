@@ -11,9 +11,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx src/db/migrate-main.ts"
+    "db:migrate": "tsx src/db/migrate-main.ts",
+    "db:seed-dev": "tsx src/db/seed-dev.ts"
   },
   "dependencies": {
+    "@fastify/cors": "^11.3.0",
     "@pherry/channel": "workspace:*",
     "@pherry/protocol": "workspace:*",
     "@pherry/relay-core": "workspace:*",

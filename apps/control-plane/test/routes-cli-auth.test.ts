@@ -345,3 +345,21 @@ describe('cli-auth approval page', () => {
     expect(res.headers['content-type']).toContain('text/html')
   })
 })
+
+describe('cli-auth approval page with DASHBOARD_URL set', () => {
+  it('302s a live request to the dashboard cli-auth page (exact Location)', async () => {
+    const world = await seedWorld({ DASHBOARD_URL: 'https://dash.example/' })
+    const s = (await start(world)).json()
+    const res = await world.app.inject({ method: 'GET', url: `/cli/auth/${s.requestId}` })
+    expect(res.statusCode).toBe(302)
+    // The trailing slash is trimmed in config, so the join never doubles up.
+    expect(res.headers.location).toBe(`https://dash.example/cli-auth/${s.requestId}`)
+  })
+
+  it('still 404s an unknown request (never redirects a dead request)', async () => {
+    const world = await seedWorld({ DASHBOARD_URL: 'https://dash.example' })
+    const res = await world.app.inject({ method: 'GET', url: '/cli/auth/car_unknown' })
+    expect(res.statusCode).toBe(404)
+    expect(res.headers['content-type']).toContain('text/html')
+  })
+})

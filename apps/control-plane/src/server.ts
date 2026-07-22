@@ -8,6 +8,7 @@
  * webhooks}`) onto this same assembly; each reads the decorated deps off the
  * instance (`app.db`, `app.redis`, `app.identity`, `app.appConfig`, `app.now`).
  */
+import cors from '@fastify/cors'
 import Fastify from 'fastify'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
@@ -79,6 +80,17 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   app.decorate('appConfig', deps.config)
   app.decorate('now', deps.now ?? (() => Date.now()))
   app.decorate('attentionChannels', deps.attentionChannels ?? defaultAttentionChannels())
+
+  // CORS is registered ONLY when the dashboard URL is configured — its browser half
+  // is the sole cross-origin caller. Unset → no plugin at all (same-origin only, as
+  // before). The allowed origin is exactly the dashboard URL's origin.
+  if (deps.config.dashboardUrl !== undefined) {
+    app.register(cors, {
+      origin: new URL(deps.config.dashboardUrl).origin,
+      methods: ['GET', 'POST', 'DELETE'],
+      allowedHeaders: ['authorization', 'content-type'],
+    })
+  }
 
   app.get('/healthz', async () => HealthResponse.parse({ ok: true }))
 

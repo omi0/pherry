@@ -79,9 +79,9 @@ Open packages must have **no import edge into `apps/`**. `apps/` may depend on t
 
 ## Status (as of the last commit)
 
-**Done, green, pushed** — 9 workspace projects, 636 tests: `protocol` (97) · `host` (59) · `channel`
+**Done, green, pushed** — 10 workspace projects, 705 tests: `protocol` (97) · `host` (59) · `channel`
 (71, audited) · `relay-core` (42) · `sdk` (5) · `transport-node` (6) · `cli` (142) · `control-plane`
-(194) · `relay` (20). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
+(218) · `relay` (20) · `dashboard` (45). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
 repo, then typing `gemini` (or `claude`/`codex`/…) is intercepted by a PATH shim → the persistent
 `pherry serve` daemon takes custody → the agent's TUI opens in your terminal while a second viewer
 (`pherry attach`) mirrors the same host-owned session.
@@ -129,5 +129,14 @@ so the binding never races), and a docked daemon's loopback hook intake (`127.0.
 end-to-end in `apps/relay/test/attention-e2e.test.ts` (real CLI raise → real CLI retrieve/ack, no
 relay needed).
 
-**Next: P3b** dashboard · **P3c** iOS app (ring + push channels) · **P3d** voice worker · **P4** cloud
-sandboxes.
+**Leg P3b is done — the dashboard.** `apps/dashboard` (proprietary; Vite + React SPA) is the browser
+half of the product: the **real sign-in + one-click approve page** completing `pherry dock`'s browser
+visit (the control plane 302s `GET /cli/auth/:id` there when `DASHBOARD_URL` is set, with CORS scoped
+to exactly that origin), the **attention inbox** (poll + urgency badges + one-time ack), and the
+console (hosts + liveness + pair-QR modal, session metadata, device revoke). Auth is a seam: Clerk
+(`VITE_CLERK_PUBLISHABLE_KEY`, lazily loaded) or a **dev-token** paste mode backed by the
+control plane's opt-in `DEV_HUMAN_TOKEN` `DevIdentityProvider` (dev/self-host only; refuses to boot
+alongside Clerk; `db:seed-dev` seeds its org/user) — so the whole loop runs locally with no IdP
+account. New control-plane surface: `GET /v1/me`. See `docs/running-locally.md` §5.
+
+**Next: P3c** iOS app (ring + push channels) · **P3d** voice worker · **P4** cloud sandboxes.

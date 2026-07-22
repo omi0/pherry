@@ -8,5 +8,6 @@ onlyBuiltDependencies:
   - node-pty
 allowBuilds:
   '@biomejs/biome': true
+  '@clerk/shared': false
   esbuild: true
   node-pty: true

@@ -60,7 +60,8 @@ The defaults already point at the compose services and share
 `INTERNAL_API_KEY=dev-internal-key` between the two apps. `DIRECTOR_URL=tcp://127.0.0.1:9443`
 is embedded verbatim into pairing QRs and relay tickets, so a local controller dials
 your local relay. Leave the Clerk block commented for now — see
-[§5](#5-the-honest-end-to-end-human-auth) when you want real human auth.
+[§6](#6-the-full-end-to-end-with-real-human-auth-clerk) when you want real human auth,
+or use the dev-token dashboard path in [§5](#5-the-dashboard--dev-sign-in-the-quickest-end-to-end).
 
 There is **no dotenv dependency**: the apps read `process.env` directly, so every
 command below loads the file with Node's native `--env-file` (or an inline
@@ -131,18 +132,61 @@ Inside a container, `localhost` is the container — reach host-published servic
 
 ---
 
-## 5. The honest end-to-end (human auth)
+## 5. The dashboard + dev sign-in (the quickest end-to-end)
+
+The **dashboard** (`apps/dashboard`, P3b) is the browser console: the real sign-in +
+one-click approve page that completes `pherry dock`, the attention inbox, and the
+hosts/sessions/devices views. Paired with the **dev identity provider** it gives you
+the whole loop with **no Clerk account at all** (dev/self-host only — the provider
+refuses to start if Clerk is also configured, and is off unless you opt in).
+
+```bash
+# 1. Opt in to the dev IdP + point the control plane at the dashboard origin
+#    (add to apps/control-plane/.env):
+DEV_HUMAN_TOKEN=dev-token-alice
+DASHBOARD_URL=http://localhost:5173
+
+# 2. Seed the org + user the dev token maps to (idempotent):
+DATABASE_URL=postgres://pherry:pherry@localhost:5433/pherry \
+  pnpm --filter @pherry/control-plane db:seed-dev
+
+# 3. Restart the control plane (it logs a loud DEV warning), then start the dashboard:
+pnpm --filter @pherry/dashboard dev        # → http://localhost:5173
+```
+
+Open `http://localhost:5173`, paste `dev-token-alice` into the **Dev sign-in** card,
+and the console loads (org "Dev"). Now the flows:
+
+- **Dock via the browser** — `pherry dock --api http://127.0.0.1:3000` opens the
+  browser; the control plane 302s to the dashboard's approval page; click
+  **Approve** and the page hands the one-time code back to the CLI's loopback —
+  the terminal finishes docking and prints the pairing QR.
+- **Attention** — raise one (`pherry attention raise --kind asks --summary
+  "ship it?" --question "deploy now?" --option yes --option no`, or curl the
+  daemon's hook port) and it appears in the **Attention** inbox within ~4s;
+  **Ack** clears it (one-time — the CLI sees it gone too).
+- **Hosts / Sessions / Devices** — liveness dots track heartbeats; **Pair phone**
+  renders the `pherry://` QR in a modal; revoked devices stop minting tickets.
+
+The dashboard reads `VITE_API_URL` (default `http://127.0.0.1:3000`) and
+`VITE_CLERK_PUBLISHABLE_KEY` (unset → the dev-token card; set → real Clerk
+sign-in, see §6).
+
+---
+
+## 6. The full end-to-end with real human auth (Clerk)
 
 **Human authentication is Clerk-backed and degrades _closed_.** With the Clerk vars
 blank, `verifyHuman` returns `null` for every token — no human can authenticate, so
 `dock` cannot sign in and no tickets are minted. This is deliberate: the app boots
 for tests without credentials, but the live path needs a real IdP.
 
-The minimal `GET /cli/auth/:id` approval page **cannot complete a browser sign-in on
-its own** — it only names the request id. The rich sign-in + one-click approve
-surface is the **P3 dashboard**. Until then, use the documented `--token` path below.
+With `DASHBOARD_URL` set, the control plane 302s `GET /cli/auth/:id` to the
+**dashboard**'s approval page ([§5](#5-the-dashboard--dev-sign-in-the-quickest-end-to-end))
+— the full browser flow. This section is the Clerk-backed version of that loop; the
+`--token` path below also still works everywhere.
 
-### 5a. Wire a free Clerk dev instance
+### 6a. Wire a free Clerk dev instance
 
 1. Create a free Clerk application (a **development** instance is fine).
 2. Copy its **Frontend API / issuer** (looks like `https://your-app.clerk.accounts.dev`)
@@ -157,7 +201,7 @@ surface is the **P3 dashboard**. Until then, use the documented `--token` path b
    `CLERK_JWKS_URL` auto-derives to `${CLERK_ISSUER}/.well-known/jwks.json` — leave
    it unset. Restart the control plane.
 
-### 5b. Seed your org + user (webhooks can't reach localhost)
+### 6b. Seed your org + user (webhooks can't reach localhost)
 
 In production a Clerk webhook syncs `orgs`/`users`. That webhook can't reach
 `localhost`, and the human resolver returns `null` for an unknown Clerk id — so seed
@@ -178,7 +222,7 @@ SQL
 org-less user cannot authenticate (columns: see
 [`apps/control-plane/src/db/schema.ts`](../apps/control-plane/src/db/schema.ts)).
 
-### 5c. Get a session JWT
+### 6c. Get a session JWT
 
 From your Clerk dev instance's hosted **Accounts** portal (or any signed-in Clerk
 page), open the browser console and run:
@@ -194,7 +238,7 @@ before each `pherry` command, or export it and move quickly:
 export JWT='eyJ…'
 ```
 
-### 5d. Dock the host
+### 6d. Dock the host
 
 `dock` signs in (here via the `--token` escape hatch), registers this host, starts
 the daemon dialing the relay, and prints a `pherry://pair` QR:
@@ -207,7 +251,7 @@ The `hk_` host credential, `host_id`, and URLs are written `0600` to
 `~/.pherry/dock.json`. Note the `host_…` id it prints (also in `dock.json`) — you'll
 need it to attach.
 
-### 5e. Give the daemon a session, then reach it two ways
+### 6e. Give the daemon a session, then reach it two ways
 
 Create a **host-owned** session for the daemon to serve over the relay — board a repo
 and launch an agent under custody:
@@ -243,7 +287,7 @@ Either way, the relay only ever sees ciphertext — the session content is E2EE 
 
 ---
 
-## 6. Teardown
+## 7. Teardown
 
 ```bash
 pherry serve --stop           # stop the docked daemon

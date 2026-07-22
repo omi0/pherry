@@ -4,12 +4,63 @@ import { eq } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import { hosts, sessions } from '../src/db/schema.js'
 import { newSessionRowId } from '../src/ids.js'
-import { seedHost, seedOrg, seedUser, seedWorld } from './support.js'
+import { makeTestApp, seedHost, seedOrg, seedUser, seedWorld } from './support.js'
 
 /** A fresh valid host static key as the wire carries it (standard base64, 32 bytes). */
 function freshKeyB64(): string {
   return encodeKey(generateKeyPair().publicKey)
 }
+
+describe('GET /v1/me', () => {
+  it('returns the caller user + org for a human bearer', async () => {
+    const world = await seedWorld()
+    const res = await world.app.inject({
+      method: 'GET',
+      url: '/v1/me',
+      headers: { authorization: `Bearer ${world.humanToken}` },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({
+      user: { id: world.user.id },
+      org: { id: world.org.id, name: world.org.name },
+    })
+  })
+
+  it('401s an unknown bearer', async () => {
+    const world = await seedWorld()
+    const res = await world.app.inject({
+      method: 'GET',
+      url: '/v1/me',
+      headers: { authorization: 'Bearer nope' },
+    })
+    expect(res.statusCode).toBe(401)
+    expect(res.json().error.code).toBe('unauthenticated')
+  })
+
+  it('401s a verified-but-unsynced token (no users row yet)', async () => {
+    // The identity provider knows the token, but no webhook has planted its user row.
+    const app = await makeTestApp(new Map([['ghost_token', 'ext_ghost']]))
+    const res = await app.app.inject({
+      method: 'GET',
+      url: '/v1/me',
+      headers: { authorization: 'Bearer ghost_token' },
+    })
+    expect(res.statusCode).toBe(401)
+    expect(res.json().error.code).toBe('unauthenticated')
+  })
+
+  it('401s a host hk_ or device dt_ token (principals never cross)', async () => {
+    const world = await seedWorld()
+    for (const token of [world.hostToken, world.deviceToken]) {
+      const res = await world.app.inject({
+        method: 'GET',
+        url: '/v1/me',
+        headers: { authorization: `Bearer ${token}` },
+      })
+      expect(res.statusCode).toBe(401)
+    }
+  })
+})
 
 describe('POST /v1/hosts', () => {
   it('registers a host and returns the hk_ credential exactly once', async () => {

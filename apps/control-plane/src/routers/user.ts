@@ -15,6 +15,17 @@ import { mintSecret } from '../services/auth.js'
 import { mintPairToken } from '../services/pairing.js'
 import { OkResponse, isoOrNull, parseBody, requireHuman, sendError } from './http.js'
 
+/**
+ * `GET /v1/me` response — the dashboard's session probe: who the bearer is and the
+ * org it acts in. A valid-shaped token whose user row is unknown (no webhook sync
+ * yet) fails the guard with the standard `401`, which the dashboard reads as an
+ * "account not linked" hint.
+ */
+const MeResponse = z.object({
+  user: z.object({ id: z.string() }),
+  org: z.object({ id: z.string(), name: z.string() }),
+})
+
 /** `POST /v1/hosts` body: a display name and the host's static X25519 key. */
 const CreateHostBody = z.object({
   name: z.string().min(1),
@@ -85,6 +96,16 @@ const ListSessionsResponse = z.object({ sessions: z.array(SessionSummary) })
 
 /** Register the human-authenticated user API onto `app`. */
 export async function userRoutes(app: FastifyInstance): Promise<void> {
+  // GET /v1/me — the dashboard's session probe: the caller's user + org, or 401.
+  app.get('/v1/me', async (request, reply) => {
+    const principal = await requireHuman(request, reply)
+    if (principal === null) return
+    return MeResponse.parse({
+      user: { id: principal.user.id },
+      org: { id: principal.org.id, name: principal.org.name },
+    })
+  })
+
   // POST /v1/hosts — register the calling machine; mint the hk_ credential once.
   app.post('/v1/hosts', async (request, reply) => {
     const principal = await requireHuman(request, reply)

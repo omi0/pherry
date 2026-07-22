@@ -60,6 +60,13 @@ export interface Config {
   readonly directorUrl: string | undefined
   /** This API's own public base URL. */
   readonly apiPublicUrl: string | undefined
+  /**
+   * The dashboard's public base URL (trailing slash trimmed). When set it enables
+   * CORS for exactly this URL's origin and makes `GET /cli/auth/:id` 302 a live
+   * request to `${dashboardUrl}/cli-auth/:id`; blank keeps today's same-origin,
+   * minimal-HTML behaviour.
+   */
+  readonly dashboardUrl: string | undefined
   /** Shared secret guarding the internal relay-validate route (relay → control plane). */
   readonly internalApiKey: string | undefined
   /** Pair-token time-to-live, in milliseconds. */
@@ -74,6 +81,14 @@ export interface Config {
   readonly attentionDebounceMs: number
   /** Ceiling the `GET /v1/attention` long-poll `wait` is clamped to, in milliseconds. */
   readonly attentionLongPollMaxMs: number
+  /**
+   * A dev/self-host human bearer token the {@link DevIdentityProvider} accepts. Set
+   * **only** for local testing without Clerk; `main.ts` activates the dev provider
+   * when this is set and Clerk is unconfigured, and refuses to start if both are set.
+   */
+  readonly devHumanToken: string | undefined
+  /** External user id the {@link devHumanToken} maps to (default `dev_user`). */
+  readonly devHumanExtUser: string
   /** Abuse-control knobs. */
   readonly rateLimits: RateLimitConfig
 }
@@ -92,7 +107,10 @@ const EnvSchema = z.object({
   CLERK_WEBHOOK_SECRET: z.string().min(1).optional(),
   DIRECTOR_URL: z.string().min(1).optional(),
   API_PUBLIC_URL: z.string().min(1).optional(),
+  DASHBOARD_URL: z.string().min(1).optional(),
   INTERNAL_API_KEY: z.string().min(1).optional(),
+  DEV_HUMAN_TOKEN: z.string().min(1).optional(),
+  DEV_HUMAN_EXT_USER: z.string().min(1).default('dev_user'),
   PAIR_TOKEN_TTL_MS: z.coerce.number().int().positive().default(600_000),
   RELAY_TICKET_TTL_MS: z.coerce.number().int().positive().default(60_000),
   CLI_AUTH_REQUEST_TTL_MS: z.coerce.number().int().positive().default(600_000),
@@ -141,7 +159,11 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     },
     directorUrl: parsed.DIRECTOR_URL,
     apiPublicUrl: parsed.API_PUBLIC_URL,
+    dashboardUrl:
+      parsed.DASHBOARD_URL !== undefined ? trimTrailingSlash(parsed.DASHBOARD_URL) : undefined,
     internalApiKey: parsed.INTERNAL_API_KEY,
+    devHumanToken: parsed.DEV_HUMAN_TOKEN,
+    devHumanExtUser: parsed.DEV_HUMAN_EXT_USER,
     pairTokenTtlMs: parsed.PAIR_TOKEN_TTL_MS,
     relayTicketTtlMs: parsed.RELAY_TICKET_TTL_MS,
     cliAuthRequestTtlMs: parsed.CLI_AUTH_REQUEST_TTL_MS,

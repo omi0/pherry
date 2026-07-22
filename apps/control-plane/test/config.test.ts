@@ -117,4 +117,33 @@ describe('loadConfig', () => {
   it('rejects a fractional TTL', () => {
     expect(() => loadConfig({ RELAY_TICKET_TTL_MS: '1.5' })).toThrow()
   })
+
+  it('leaves the dashboard + dev-identity knobs unset by default', () => {
+    const config = loadConfig({})
+    expect(config.dashboardUrl).toBeUndefined()
+    expect(config.devHumanToken).toBeUndefined()
+    expect(config.devHumanExtUser).toBe('dev_user')
+  })
+
+  it('reads the dashboard URL and trims a trailing slash', () => {
+    expect(loadConfig({ DASHBOARD_URL: 'https://dash.example' }).dashboardUrl).toBe(
+      'https://dash.example',
+    )
+    expect(loadConfig({ DASHBOARD_URL: 'https://dash.example/' }).dashboardUrl).toBe(
+      'https://dash.example',
+    )
+    expect(loadConfig({ DASHBOARD_URL: 'https://dash.example/app///' }).dashboardUrl).toBe(
+      'https://dash.example/app',
+    )
+  })
+
+  it('reads the dev-identity knobs', () => {
+    const config = loadConfig({ DEV_HUMAN_TOKEN: 'dev_secret', DEV_HUMAN_EXT_USER: 'ext_dev' })
+    expect(config.devHumanToken).toBe('dev_secret')
+    expect(config.devHumanExtUser).toBe('ext_dev')
+  })
+
+  it('treats a blank DEV_HUMAN_EXT_USER as the default', () => {
+    expect(loadConfig({ DEV_HUMAN_EXT_USER: '' }).devHumanExtUser).toBe('dev_user')
+  })
 })

@@ -6,9 +6,27 @@
  */
 import { makeClerkIdentity } from './adapters/clerk.js'
 import { makeIoredis } from './adapters/redis.js'
+import type { Config } from './config.js'
 import { loadConfig } from './config.js'
 import { makeDb } from './db/client.js'
+import type { IdentityProvider } from './identity.js'
+import { DevIdentityProvider, selectIdentity } from './identity.js'
 import { buildServer } from './server.js'
+
+/**
+ * Resolve the identity provider from config: the Clerk adapter, or — for dev/self-host
+ * only — the {@link DevIdentityProvider} when `DEV_HUMAN_TOKEN` is set and Clerk is
+ * unconfigured (logging one loud boot warning). {@link selectIdentity} throws when
+ * both are configured, so an ambiguous setup fails fast here.
+ */
+function makeIdentity(config: Config): IdentityProvider {
+  const selection = selectIdentity(config)
+  if (selection.kind === 'dev') {
+    console.log('DEV_HUMAN_TOKEN is set — dev identity provider active; do not use in production')
+    return new DevIdentityProvider(selection.token, selection.externalUserId)
+  }
+  return makeClerkIdentity(config)
+}
 
 /** Load config, construct the real adapters, and start listening. */
 async function main(): Promise<void> {
@@ -18,7 +36,7 @@ async function main(): Promise<void> {
 
   const db = makeDb(config.databaseUrl)
   const redis = makeIoredis(config.redisUrl)
-  const identity = makeClerkIdentity(config)
+  const identity = makeIdentity(config)
   const app = buildServer({ db, redis, identity, config })
 
   const port = Number(process.env.PORT ?? '3000')
