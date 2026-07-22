@@ -81,7 +81,13 @@ struct SessionListView: View {
 private struct SessionRow: View {
     let session: SessionSummary
 
-    private var agent: String { session.argv.first ?? "session" }
+    /// The agent's display name: the last path component of the command. The wire's
+    /// `argv[0]` is the *resolved* binary (often a long shim/install path); the human
+    /// answer to "what is this session?" is just `claude`, not where claude lives.
+    private var agent: String {
+        guard let command = session.argv.first else { return "session" }
+        return command.split(separator: "/").last.map(String.init) ?? command
+    }
 
     var body: some View {
         Card {
