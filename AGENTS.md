@@ -140,3 +140,5 @@ alongside Clerk; `db:seed-dev` seeds its org/user) — so the whole loop runs lo
 account. New control-plane surface: `GET /v1/me`. See `docs/running-locally.md` §5.
 
 **Next: P3c** iOS app (ring + push channels) · **P3d** voice worker · **P4** cloud sandboxes.
+Continuing an in-flight phase? Read [`docs/HANDOFF.md`](./docs/HANDOFF.md) — state, seams, and the
+working pattern, condensed for the next agent.
