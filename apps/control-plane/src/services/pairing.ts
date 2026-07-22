@@ -34,8 +34,10 @@ export interface MintPairTokenResult {
  * Mint a one-time pair token bound to `host` (and its owning `user`/`org`). Stores
  * only the SHA-256 hash + an audit row; returns the plaintext once alongside the
  * QR deep link. The QR carries the host's **static public key** as base64url so the
- * redeeming controller can pin it (the §4 host-proof), the host id for routing, and
- * the director URL (blank when unconfigured).
+ * redeeming controller can pin it (the §4 host-proof), the host id for routing, the
+ * director URL, and the API's own public URL as `&api=` — a phone (unlike the docked
+ * CLI) has no local dock config to learn the control plane's address from, so the QR
+ * carries it. Both `&director=` and `&api=` are blank when their config is unset.
  */
 export async function mintPairToken(
   db: Db,
@@ -57,7 +59,7 @@ export async function mintPairToken(
   const keyB64Url = Buffer.from(args.host.staticPublicKey, 'base64').toString('base64url')
   const qrUrl =
     `pherry://pair?token=${secret.token}&host=${args.host.id}` +
-    `&key=${keyB64Url}&director=${config.directorUrl ?? ''}`
+    `&key=${keyB64Url}&director=${config.directorUrl ?? ''}&api=${config.apiPublicUrl ?? ''}`
   return { pairToken: secret.token, expiresAt, qrUrl }
 }
 

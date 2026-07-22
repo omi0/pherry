@@ -1,0 +1,67 @@
+{
+  "description": "record layer: XChaCha20-Poly1305 seal per counter (no AAD), wire = u32_BE(len) || record",
+  "keyHex": "0708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526",
+  "sessionIdHex": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+  "directions": [
+    {
+      "direction": "initiatorToResponder",
+      "directionByte": 0,
+      "records": [
+        {
+          "counter": 0,
+          "plaintextHex": "",
+          "recordHex": "3c0d42be76b8e31e469859ed6363bb89",
+          "wireHex": "000000103c0d42be76b8e31e469859ed6363bb89"
+        },
+        {
+          "counter": 1,
+          "plaintextHex": "68656c6c6f",
+          "recordHex": "0c2bb3ee685dba182dee118843370c6ab35cb07ec6",
+          "wireHex": "000000150c2bb3ee685dba182dee118843370c6ab35cb07ec6"
+        },
+        {
+          "counter": 2,
+          "plaintextHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+          "recordHex": "bad41cade9ea324f568aba9b2c6cdacbe61bd5b531d411c7e51cdc3d725b9707f9ab865dc48407ed5c66b4d781a387555e06597e43a0bda2f327a950fd72aff353f8038da82a9de29789adb90381c613",
+          "wireHex": "00000050bad41cade9ea324f568aba9b2c6cdacbe61bd5b531d411c7e51cdc3d725b9707f9ab865dc48407ed5c66b4d781a387555e06597e43a0bda2f327a950fd72aff353f8038da82a9de29789adb90381c613"
+        },
+        {
+          "counter": 3,
+          "plaintextHex": "74686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67",
+          "recordHex": "6449100d0d2b6522fb0d2ca34d46f591b00bbaf8d2dbc4d2eb950945af67be66cc38548c2b9e3b2b5f391697399cf0861ef2aeba7da0ee14e561b9",
+          "wireHex": "0000003b6449100d0d2b6522fb0d2ca34d46f591b00bbaf8d2dbc4d2eb950945af67be66cc38548c2b9e3b2b5f391697399cf0861ef2aeba7da0ee14e561b9"
+        }
+      ]
+    },
+    {
+      "direction": "responderToInitiator",
+      "directionByte": 1,
+      "records": [
+        {
+          "counter": 0,
+          "plaintextHex": "",
+          "recordHex": "ca72eca4614e5c1cbe4654662e4f40e5",
+          "wireHex": "00000010ca72eca4614e5c1cbe4654662e4f40e5"
+        },
+        {
+          "counter": 1,
+          "plaintextHex": "68656c6c6f",
+          "recordHex": "c3c40e4ad3feb7d9054d0792820d615c14a42b012f",
+          "wireHex": "00000015c3c40e4ad3feb7d9054d0792820d615c14a42b012f"
+        },
+        {
+          "counter": 2,
+          "plaintextHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+          "recordHex": "addecf7753ddfaa0d7e260845a0f2e8bec7d08794fdcc7c5b821ff2e5189a9cbad25e79c64055f07be9d878a357e1a84452ff09054d95b4e0391689fff35d54fe0787e1d0c2b1a61d295ca7d750df213",
+          "wireHex": "00000050addecf7753ddfaa0d7e260845a0f2e8bec7d08794fdcc7c5b821ff2e5189a9cbad25e79c64055f07be9d878a357e1a84452ff09054d95b4e0391689fff35d54fe0787e1d0c2b1a61d295ca7d750df213"
+        },
+        {
+          "counter": 3,
+          "plaintextHex": "74686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67",
+          "recordHex": "db2a014f7ad6de0de2bebe19a3d0151a02760a58c1e2518150a80adbddfa86e023a2d87b4dbce8c3f37bf3de6737708abb2034cdcc7042b30c1c44",
+          "wireHex": "0000003bdb2a014f7ad6de0de2bebe19a3d0151a02760a58c1e2518150a80adbddfa86e023a2d87b4dbce8c3f37bf3de6737708abb2034cdcc7042b30c1c44"
+        }
+      ]
+    }
+  ]
+}

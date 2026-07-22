@@ -15,6 +15,13 @@
       "when": 1784675927143,
       "tag": "0001_rapid_blazing_skull",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784720447976,
+      "tag": "0002_jittery_crystal",
+      "breakpoints": true
     }
   ]
 }

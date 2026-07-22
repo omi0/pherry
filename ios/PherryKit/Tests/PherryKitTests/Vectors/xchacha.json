@@ -1,0 +1,26 @@
+{
+  "description": "XChaCha20-Poly1305 seal (no AAD), via @noble/ciphers",
+  "cases": [
+    {
+      "description": "empty plaintext",
+      "keyHex": "0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a",
+      "nonce24Hex": "000102030405060708090a0b0c0d0e0f1011121314151617",
+      "plaintextHex": "",
+      "ciphertextHex": "f12089fa7329d3009b3fd935057c427f"
+    },
+    {
+      "description": "short plaintext",
+      "keyHex": "0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b",
+      "nonce24Hex": "090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "plaintextHex": "706865727279",
+      "ciphertextHex": "c65cd23f7a4fc4bbcc4d8cea252e53267382759c984b"
+    },
+    {
+      "description": "64-byte plaintext",
+      "keyHex": "0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c",
+      "nonce24Hex": "404142434445464748494a4b4c4d4e4f5051525354555657",
+      "plaintextHex": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0dfdedddcdbdad9d8d7d6d5d4d3d2d1d0cfcecdcccbcac9c8c7c6c5c4c3c2c1c0",
+      "ciphertextHex": "3e68ee29319cd9e6fb703dfb4ef65b632091f0b3ea7168e54fa9a84a3d2ef7d3753ecb545b414e02958b0a27cdbd7b34b2128539025b5a9d80c17da59af8886634d54322ed7aa08a81c9a3ef1aabd016"
+    }
+  ]
+}

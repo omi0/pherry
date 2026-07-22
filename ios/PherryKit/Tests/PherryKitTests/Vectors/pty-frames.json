@@ -1,0 +1,99 @@
+{
+  "description": "PTY frame codec (16-byte LE header)",
+  "frames": [
+    {
+      "description": "output",
+      "opcode": 1,
+      "streamId": 1,
+      "seq": 0,
+      "payloadHex": "24206c730d0a",
+      "encodedHex": "7401010001000000000000000000000024206c730d0a"
+    },
+    {
+      "description": "snapshotStart size",
+      "opcode": 2,
+      "streamId": 7,
+      "seq": 3,
+      "payloadHex": "78002800",
+      "encodedHex": "7401020007000000030000000000000078002800"
+    },
+    {
+      "description": "snapshotChunk",
+      "opcode": 3,
+      "streamId": 7,
+      "seq": 4,
+      "payloadHex": "1b5b324a73637265656e",
+      "encodedHex": "740103000700000004000000000000001b5b324a73637265656e"
+    },
+    {
+      "description": "snapshotEnd",
+      "opcode": 4,
+      "streamId": 7,
+      "seq": 5,
+      "payloadHex": "",
+      "encodedHex": "74010400070000000500000000000000"
+    },
+    {
+      "description": "resized",
+      "opcode": 5,
+      "streamId": 7,
+      "seq": 6,
+      "payloadHex": "50001800",
+      "encodedHex": "7401050007000000060000000000000050001800"
+    },
+    {
+      "description": "ended exit 0",
+      "opcode": 6,
+      "streamId": 7,
+      "seq": 7,
+      "payloadHex": "00000000",
+      "encodedHex": "7401060007000000070000000000000000000000"
+    },
+    {
+      "description": "ended exit 137",
+      "opcode": 6,
+      "streamId": 7,
+      "seq": 8,
+      "payloadHex": "89000000",
+      "encodedHex": "7401060007000000080000000000000089000000"
+    },
+    {
+      "description": "ended signalled (null)",
+      "opcode": 6,
+      "streamId": 7,
+      "seq": 9,
+      "payloadHex": "",
+      "encodedHex": "74010600070000000900000000000000"
+    },
+    {
+      "description": "gap",
+      "opcode": 7,
+      "streamId": 7,
+      "seq": 10,
+      "payloadHex": "",
+      "encodedHex": "74010700070000000a00000000000000"
+    },
+    {
+      "description": "large seq (u64 high word)",
+      "opcode": 1,
+      "streamId": 3735928559,
+      "seq": 4294967298,
+      "payloadHex": "78",
+      "encodedHex": "74010100efbeadde020000000100000078"
+    }
+  ],
+  "undecodable": [
+    {
+      "description": "too short (8 bytes)",
+      "bytesHex": "0000000000000000"
+    },
+    {
+      "description": "bad magic",
+      "bytesHex": "75000000000000000000000000000000"
+    },
+    {
+      "description": "bad version",
+      "bytesHex": "74020000000000000000000000000000"
+    }
+  ]
+}

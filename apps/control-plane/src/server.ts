@@ -15,9 +15,11 @@ import { z } from 'zod'
 import type { Config } from './config.js'
 import type { Db } from './db/client.js'
 import type { IdentityProvider } from './identity.js'
+import type { PushSender } from './push.js'
 import type { RedisLike } from './redis.js'
 import { attentionRoutes } from './routers/attention.js'
 import { cliAuthRoutes } from './routers/cli-auth.js'
+import { deviceRoutes } from './routers/device.js'
 import { hostRoutes } from './routers/host.js'
 import { internalRoutes } from './routers/internal.js'
 import { pairingRoutes } from './routers/pairing.js'
@@ -25,7 +27,7 @@ import { relayRoutes } from './routers/relay.js'
 import { userRoutes } from './routers/user.js'
 import { webhooksRoutes } from './routers/webhooks.js'
 import type { AttentionChannel } from './services/attention-channels.js'
-import { defaultAttentionChannels } from './services/attention-channels.js'
+import { buildAttentionChannels } from './services/attention-channels.js'
 
 /** Everything the server needs, injected. No env or network access happens here. */
 export interface ServerDeps {
@@ -40,8 +42,15 @@ export interface ServerDeps {
   /** Injectable clock in epoch milliseconds; defaults to `Date.now`. */
   readonly now?: () => number
   /**
-   * The attention channel registry (§8); defaults to the three built-ins (real
-   * in-app + push/ring stubs). Tests inject spies to observe routing + fan-out.
+   * The outbound push sender (prod: APNs; test: `FakePushSender`). When set, the
+   * default channel registry becomes the **real** push + ring channels; when unset,
+   * the honest logging stubs. Ignored if {@link ServerDeps.attentionChannels} is given.
+   */
+  readonly pushSender?: PushSender
+  /**
+   * The attention channel registry (§8); defaults to {@link buildAttentionChannels}
+   * over {@link ServerDeps.pushSender} (real in-app always, real push/ring with a
+   * sender, stubs without). Tests inject spies to observe routing + fan-out.
    */
   readonly attentionChannels?: AttentionChannel[]
 }
@@ -79,7 +88,10 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   app.decorate('identity', deps.identity)
   app.decorate('appConfig', deps.config)
   app.decorate('now', deps.now ?? (() => Date.now()))
-  app.decorate('attentionChannels', deps.attentionChannels ?? defaultAttentionChannels())
+  app.decorate(
+    'attentionChannels',
+    deps.attentionChannels ?? buildAttentionChannels({ db: deps.db, sender: deps.pushSender }),
+  )
 
   // CORS is registered ONLY when the dashboard URL is configured — its browser half
   // is the sole cross-origin caller. Unset → no plugin at all (same-origin only, as
@@ -104,6 +116,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   app.register(relayRoutes)
   app.register(internalRoutes)
   app.register(attentionRoutes)
+  app.register(deviceRoutes)
   app.register(webhooksRoutes)
 
   return app

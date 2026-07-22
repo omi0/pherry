@@ -170,6 +170,18 @@ describe('POST /v1/hosts/:id/pair', () => {
     expect(typeof body.expiresAt).toBe('number')
     expect(body.qrUrl).toContain(`host=${world.host.id}`)
     expect(body.qrUrl).toContain('pherry://pair?token=pt_')
+    // The QR always carries an &api= param (blank when API_PUBLIC_URL is unset).
+    expect(body.qrUrl).toContain('&api=')
+  })
+
+  it('embeds the API public url in the QR when configured', async () => {
+    const world = await seedWorld({ API_PUBLIC_URL: 'https://api.pherry.dev' })
+    const res = await world.app.inject({
+      method: 'POST',
+      url: `/v1/hosts/${world.host.id}/pair`,
+      headers: { authorization: `Bearer ${world.humanToken}` },
+    })
+    expect(res.json().qrUrl).toContain('&api=https://api.pherry.dev')
   })
 
   it('404s a revoked host', async () => {

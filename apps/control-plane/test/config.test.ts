@@ -146,4 +146,38 @@ describe('loadConfig', () => {
   it('treats a blank DEV_HUMAN_EXT_USER as the default', () => {
     expect(loadConfig({ DEV_HUMAN_EXT_USER: '' }).devHumanExtUser).toBe('dev_user')
   })
+
+  it('leaves the APNs credentials unset with a sandbox environment default', () => {
+    const config = loadConfig({})
+    expect(config.apns.teamId).toBeUndefined()
+    expect(config.apns.keyId).toBeUndefined()
+    expect(config.apns.privateKey).toBeUndefined()
+    expect(config.apns.bundleId).toBeUndefined()
+    expect(config.apns.environment).toBe('sandbox')
+  })
+
+  it('reads the APNs knobs', () => {
+    const config = loadConfig({
+      APNS_TEAM_ID: 'TEAM123',
+      APNS_KEY_ID: 'KEY123',
+      APNS_PRIVATE_KEY: '-----BEGIN PRIVATE KEY-----',
+      APNS_BUNDLE_ID: 'dev.pherry.app',
+      APNS_ENVIRONMENT: 'production',
+    })
+    expect(config.apns).toEqual({
+      teamId: 'TEAM123',
+      keyId: 'KEY123',
+      privateKey: '-----BEGIN PRIVATE KEY-----',
+      bundleId: 'dev.pherry.app',
+      environment: 'production',
+    })
+  })
+
+  it('treats a blank APNS_ENVIRONMENT as the sandbox default', () => {
+    expect(loadConfig({ APNS_ENVIRONMENT: '' }).apns.environment).toBe('sandbox')
+  })
+
+  it('rejects an invalid APNS_ENVIRONMENT', () => {
+    expect(() => loadConfig({ APNS_ENVIRONMENT: 'staging' })).toThrow()
+  })
 })

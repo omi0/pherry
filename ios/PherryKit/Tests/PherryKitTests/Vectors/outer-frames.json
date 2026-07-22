@@ -1,0 +1,30 @@
+{
+  "description": "outer coordination framing (u32_BE(len) || UTF-8 JSON, 16 KiB cap)",
+  "messages": [
+    {
+      "description": "data-auth (controller)",
+      "json": "{\"t\":\"data-auth\",\"role\":\"controller\",\"ticket\":\"tkt_0000000000000000000000000000abcd\"}",
+      "framedHex": "000000557b2274223a22646174612d61757468222c22726f6c65223a22636f6e74726f6c6c6572222c227469636b6574223a22746b745f3030303030303030303030303030303030303030303030303030303061626364227d"
+    },
+    {
+      "description": "data-ready",
+      "json": "{\"t\":\"data-ready\"}",
+      "framedHex": "000000127b2274223a22646174612d7265616479227d"
+    },
+    {
+      "description": "close bad-ticket",
+      "json": "{\"t\":\"close\",\"code\":\"bad-ticket\"}",
+      "framedHex": "000000217b2274223a22636c6f7365222c22636f6465223a226261642d7469636b6574227d"
+    },
+    {
+      "description": "close drained with reason",
+      "json": "{\"t\":\"close\",\"code\":\"drained\",\"reason\":\"cell draining\"}",
+      "framedHex": "000000377b2274223a22636c6f7365222c22636f6465223a22647261696e6564222c22726561736f6e223a2263656c6c20647261696e696e67227d"
+    }
+  ],
+  "coalesced": {
+    "description": "data-ready frame + trailing raw channel bytes in one chunk",
+    "chunkHex": "000000127b2274223a22646174612d7265616479227d00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11",
+    "rawTailHex": "00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11"
+  }
+}

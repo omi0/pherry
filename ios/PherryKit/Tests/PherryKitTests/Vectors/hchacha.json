@@ -1,0 +1,17 @@
+{
+  "description": "HChaCha20 subkey derivation (cross-checked vs @noble hchacha)",
+  "cases": [
+    {
+      "description": "sequential key/input",
+      "keyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "input16Hex": "101112131415161718191a1b1c1d1e1f",
+      "subkeyHex": "0bde6e74ec830a779b754eec40483c2c3dda34a9267b79b25ac58f5b2e114251"
+    },
+    {
+      "description": "high-byte key/input",
+      "keyHex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "input16Hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+      "subkeyHex": "9df85e7d68f5855e051f62ef9f326a4aad8540d86f6ec6245745162d1bd7737e"
+    }
+  ]
+}

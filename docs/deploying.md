@@ -69,12 +69,48 @@ publicly reachable, so real user/org sync works: point a Clerk webhook at
 signing secret. Users and orgs then populate `users`/`orgs` automatically — no manual
 seeding (contrast the local flow in [`running-locally.md`](./running-locally.md#5b-seed-your-org--user-webhooks-cant-reach-localhost)).
 
+### APNs (the push + ring channels)
+
+The attention plane's **push** (APNs alert) and **ring** (PushKit VoIP → CallKit)
+channels are delivered by the control plane behind an injected `PushSender` — exactly
+like Clerk sits behind `IdentityProvider`. It uses Apple's **token-based (`.p8`) auth**,
+so there is no certificate to rotate: create one **APNs Auth Key** in the Apple Developer
+portal (Keys → new key with the *Apple Push Notifications service* capability), download
+the `.p8` once, and note its **Key ID** and your **Team ID**.
+
+| Var | Value | Notes |
+|---|---|---|
+| `APNS_TEAM_ID` | your 10-char Apple team id | the provider JWT `iss` |
+| `APNS_KEY_ID` | the `.p8` key id | the provider JWT header `kid` |
+| `APNS_PRIVATE_KEY` | the **contents** of the `.p8` PEM | a secret — inject via the secret store, never the image; multiline is fine |
+| `APNS_BUNDLE_ID` | the iOS app bundle id | the `apns-topic`; VoIP pushes use `${APNS_BUNDLE_ID}.voip` |
+| `APNS_ENVIRONMENT` | `sandbox` (default) or `production` | which APNs host is dialed — `production` for App Store / TestFlight builds, `sandbox` for a development build |
+
+```bash
+fly secrets set --config fly.control-plane.toml \
+  APNS_TEAM_ID='ABCDE12345' \
+  APNS_KEY_ID='KEY1234567' \
+  APNS_PRIVATE_KEY="$(cat AuthKey_KEY1234567.p8)" \
+  APNS_BUNDLE_ID='dev.pherry.app' \
+  APNS_ENVIRONMENT='production'
+```
+
+**All four creds are required to activate real delivery.** With any of them blank the
+push/ring channels **degrade to the P3a logging stubs** — the raise still succeeds and
+the in-app queue (`GET /v1/attention`) is unaffected, but nothing is pushed and each
+would-be delivery writes one honest log line. So a control plane with no APNs config
+runs fine; it just doesn't ring a phone. The `sandbox`/`production` split must match the
+build installed on the device — a token minted by a development build is rejected by the
+production host and vice versa (surfaced as a self-healing `bad-token`, which clears the
+dead token from the device row).
+
 ### Secrets hygiene
 
 **Never bake secrets into an image.** The Dockerfiles copy only prod deps + compiled
 output; every credential above is injected at runtime by the platform's secret store
 (`fly secrets`, a k8s Secret, etc.). Keep `INTERNAL_API_KEY` strong and rotate it in
-lockstep across the control plane and all cells.
+lockstep across the control plane and all cells. The APNs `.p8` is a secret too — inject
+`APNS_PRIVATE_KEY` at runtime, never commit the key file.
 
 ### Scaling (straight from the architecture)
 

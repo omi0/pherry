@@ -54,8 +54,12 @@ Full design + roadmap: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) (visual 
 | `packages/cli/` | the `pherry` CLI + the reusable **`runTerminalClient`** engine | open |
 | `apps/control-plane/` | the router: auth · tenancy · pairing · relay coordination — Fastify + Drizzle/Postgres + Redis | proprietary |
 | `apps/relay/` | the deployable blind cell: `relay-core` + the control-plane authorizer | proprietary |
+| `ios/` | the iOS controller app + `PherryKit` (the wire in Swift) — **outside the pnpm workspace** | proprietary |
 
 Open packages must have **no import edge into `apps/`**. `apps/` may depend on the open packages.
+`ios/` is Swift with its own gate (`swift test` in `ios/PherryKit`, `xcodegen generate` + an unsigned
+simulator build; see `ios/README.md`); biome ignores it (`biome.json` `files.ignore` — biome 1.9
+does not honor nested `.gitignore`s), and the JS verify gate is untouched by it.
 
 ## Toolchain + the verify gate
 
@@ -79,9 +83,10 @@ Open packages must have **no import edge into `apps/`**. `apps/` may depend on t
 
 ## Status (as of the last commit)
 
-**Done, green, pushed** — 10 workspace projects, 705 tests: `protocol` (97) · `host` (59) · `channel`
+**Done, green, pushed** — 10 workspace projects, 774 tests: `protocol` (97) · `host` (59) · `channel`
 (71, audited) · `relay-core` (42) · `sdk` (5) · `transport-node` (6) · `cli` (142) · `control-plane`
-(218) · `relay` (20) · `dashboard` (45). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
+(287) · `relay` (20) · `dashboard` (45); plus, outside the workspace, `ios/` — `PherryKit` (39 Swift
+tests, conformance-vector-proven against the TS wire) and the app's unit bundle (25). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
 repo, then typing `gemini` (or `claude`/`codex`/…) is intercepted by a PATH shim → the persistent
 `pherry serve` daemon takes custody → the agent's TUI opens in your terminal while a second viewer
 (`pherry attach`) mirrors the same host-owned session.
@@ -139,6 +144,23 @@ control plane's opt-in `DEV_HUMAN_TOKEN` `DevIdentityProvider` (dev/self-host on
 alongside Clerk; `db:seed-dev` seeds its org/user) — so the whole loop runs locally with no IdP
 account. New control-plane surface: `GET /v1/me`. See `docs/running-locally.md` §5.
 
-**Next: P3c** iOS app (ring + push channels) · **P3d** voice worker · **P4** cloud sandboxes.
+**Leg P3c is done — the phone is real.** `ios/` (proprietary, outside the pnpm workspace) is the
+native controller: scan `dock`'s QR (now carrying `&api=`) → redeem → `dt_` in the Keychain; reach a
+session exactly as `pherry attach --host` does (ticket → blind cell → initiator channel pinned +
+context-bound → `ControllerClient`) and steer it in a SwiftTerm terminal view. `PherryKit` is the
+whole wire re-implemented in Swift — Noise-NK handshake, HKDF schedule, XChaCha20-Poly1305 records
+(hand-rolled HChaCha20; CryptoKit has none), relay outer protocol, PTY codec — proven byte-equivalent
+by committed conformance vectors regenerated from the TS dists (`ios/scripts/generate-vectors.mjs`).
+The attention plane's **push** and **ring** stubs are now real channels behind an injected
+`PushSender` seam (mirroring `IdentityProvider`): APNs token-auth via `jose` + `node:http2`
+(`adapters/apns.ts`), alert pushes with kind-mapped titles, VoIP pushes (`apns-expiration: 0`) that
+the app must report to CallKit synchronously — the v1 **ring finale**: raise `--urgency call` → the
+phone rings full-screen → answer opens the session. Devices register tokens via
+`POST /v1/device/push-tokens` (`dt_` only; migration `0002` adds `voip_push_token`); a dead token
+(APNs `410`/`BadDeviceToken`) self-heals by clearing exactly that column. Blank APNs config degrades
+to the P3a logging stubs; no test ever hits APNs (`FakePushSender`). Real-device ringing needs Apple
+credentials + a physical iPhone (see `ios/README.md` + `docs/deploying.md` APNs).
+
+**Next: P3d** voice worker (LiveKit room behind the ring channel) · **P4** cloud sandboxes.
 Continuing an in-flight phase? Read [`docs/HANDOFF.md`](./docs/HANDOFF.md) — state, seams, and the
 working pattern, condensed for the next agent.

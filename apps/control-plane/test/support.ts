@@ -16,6 +16,7 @@ import * as schema from '../src/db/schema.js'
 import type { Device, Host, Org, SessionRow, User } from '../src/db/schema.js'
 import { FakeIdentityProvider } from '../src/identity.js'
 import { newOrgId, newSessionRowId, newUserId } from '../src/ids.js'
+import type { PushSender } from '../src/push.js'
 import { MemoryRedis } from '../src/redis.js'
 import { buildServer } from '../src/server.js'
 import type { AttentionChannel } from '../src/services/attention-channels.js'
@@ -61,6 +62,7 @@ export async function makeTestApp(
   humanTokens?: Map<string, string>,
   env?: Record<string, string | undefined>,
   attentionChannels?: AttentionChannel[],
+  pushSender?: PushSender,
 ): Promise<TestApp> {
   const db = await makeTestDb()
   let current = TEST_NOW
@@ -75,6 +77,7 @@ export async function makeTestApp(
     config,
     now,
     ...(attentionChannels !== undefined ? { attentionChannels } : {}),
+    ...(pushSender !== undefined ? { pushSender } : {}),
   })
   await app.ready()
   return {
@@ -116,8 +119,14 @@ export interface SeededWorld extends TestApp {
 export async function seedWorld(
   env?: Record<string, string | undefined>,
   attentionChannels?: AttentionChannel[],
+  pushSender?: PushSender,
 ): Promise<SeededWorld> {
-  const app = await makeTestApp(new Map([[HUMAN_TOKEN, CLERK_USER]]), env, attentionChannels)
+  const app = await makeTestApp(
+    new Map([[HUMAN_TOKEN, CLERK_USER]]),
+    env,
+    attentionChannels,
+    pushSender,
+  )
   const org = await seedOrg(app.db)
   const user = await seedUser(app.db, { orgId: org.id, clerkUserId: CLERK_USER })
   const host = await seedHost(app.db, { orgId: org.id, userId: user.id })

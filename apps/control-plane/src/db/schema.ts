@@ -67,8 +67,11 @@ export const hosts = pgTable('hosts', {
 
 /**
  * A controller device (the phone / CLI), obtained by redeeming a pair token.
- * {@link devices.deviceTokenHash} is the SHA-256 of the `dt_` token. `pushToken`
- * is reserved for the P3 attention plane. A non-null `revokedAt` disables it.
+ * {@link devices.deviceTokenHash} is the SHA-256 of the `dt_` token. `pushToken` is
+ * the APNs **alert** token (the push channel) and `voipPushToken` the PushKit token
+ * (the ring channel) — distinct APNs credentials, both registered via
+ * `POST /v1/device/push-tokens`, and both **cleared by the channel** when APNs reports
+ * the token dead (self-healing). A non-null `revokedAt` disables the device.
  */
 export const devices = pgTable('devices', {
   id: text('id').primaryKey(),
@@ -81,7 +84,10 @@ export const devices = pgTable('devices', {
   name: text('name').notNull(),
   deviceTokenHash: text('device_token_hash').notNull().unique(),
   deviceTokenPrefix: text('device_token_prefix').notNull(),
+  /** The APNs alert push token (the push channel); `null` until the phone registers it. */
   pushToken: text('push_token'),
+  /** The PushKit VoIP push token (the ring channel); `null` until the phone registers it. */
+  voipPushToken: text('voip_push_token'),
   lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),
   revokedAt: timestamp('revoked_at', { withTimezone: true }),
   ...timestamps,

@@ -34,6 +34,25 @@ export interface ClerkConfig {
   readonly webhookSecret: string | undefined
 }
 
+/**
+ * The APNs credential slice (the push + ring channels). All four creds are optional;
+ * an **incomplete set degrades** to today's honest logging stubs (`main.ts` builds the
+ * real sender only when {@link apnsConfigured} is true). `environment` selects which
+ * APNs authority the transport dials and always has a default, so it is never blank.
+ */
+export interface ApnsConfig {
+  /** The Apple developer **team id** (the JWT `iss`). Blank → the sender is not built. */
+  readonly teamId: string | undefined
+  /** The `.p8` auth key id (the JWT header `kid`). Blank → the sender is not built. */
+  readonly keyId: string | undefined
+  /** The `.p8` private-key PEM contents. A credential — never logged. Blank → not built. */
+  readonly privateKey: string | undefined
+  /** The app bundle id — the `apns-topic` (voip topic is `${bundleId}.voip`). Blank → not built. */
+  readonly bundleId: string | undefined
+  /** Which APNs host to dial: `sandbox` (default) or `production`. */
+  readonly environment: 'sandbox' | 'production'
+}
+
 /** Abuse-control knobs, all per-minute counts with defaults. */
 export interface RateLimitConfig {
   /** Max `POST /v1/pair/redeem` attempts per minute per client. */
@@ -89,6 +108,8 @@ export interface Config {
   readonly devHumanToken: string | undefined
   /** External user id the {@link devHumanToken} maps to (default `dev_user`). */
   readonly devHumanExtUser: string
+  /** APNs credentials for the push/ring channels; an incomplete set degrades to the stubs. */
+  readonly apns: ApnsConfig
   /** Abuse-control knobs. */
   readonly rateLimits: RateLimitConfig
 }
@@ -111,6 +132,11 @@ const EnvSchema = z.object({
   INTERNAL_API_KEY: z.string().min(1).optional(),
   DEV_HUMAN_TOKEN: z.string().min(1).optional(),
   DEV_HUMAN_EXT_USER: z.string().min(1).default('dev_user'),
+  APNS_TEAM_ID: z.string().min(1).optional(),
+  APNS_KEY_ID: z.string().min(1).optional(),
+  APNS_PRIVATE_KEY: z.string().min(1).optional(),
+  APNS_BUNDLE_ID: z.string().min(1).optional(),
+  APNS_ENVIRONMENT: z.enum(['sandbox', 'production']).default('sandbox'),
   PAIR_TOKEN_TTL_MS: z.coerce.number().int().positive().default(600_000),
   RELAY_TICKET_TTL_MS: z.coerce.number().int().positive().default(60_000),
   CLI_AUTH_REQUEST_TTL_MS: z.coerce.number().int().positive().default(600_000),
@@ -164,6 +190,13 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     internalApiKey: parsed.INTERNAL_API_KEY,
     devHumanToken: parsed.DEV_HUMAN_TOKEN,
     devHumanExtUser: parsed.DEV_HUMAN_EXT_USER,
+    apns: {
+      teamId: parsed.APNS_TEAM_ID,
+      keyId: parsed.APNS_KEY_ID,
+      privateKey: parsed.APNS_PRIVATE_KEY,
+      bundleId: parsed.APNS_BUNDLE_ID,
+      environment: parsed.APNS_ENVIRONMENT,
+    },
     pairTokenTtlMs: parsed.PAIR_TOKEN_TTL_MS,
     relayTicketTtlMs: parsed.RELAY_TICKET_TTL_MS,
     cliAuthRequestTtlMs: parsed.CLI_AUTH_REQUEST_TTL_MS,
@@ -178,4 +211,21 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
       attentionOrgPerMin: parsed.RATE_LIMIT_ATTENTION_ORG_PER_MIN,
     },
   }
+}
+
+/**
+ * Whether the APNs sender can be built — **all four** credentials present (the
+ * `environment` always has a default, so it never gates). Pure over {@link Config},
+ * so it is unit-tested directly; `main.ts` calls it to decide between the real APNs
+ * sender and the honest logging stubs, and `adapters/apns.ts` relies on the same
+ * guarantee (it fails loudly if handed an incomplete set).
+ */
+export function apnsConfigured(config: Config): boolean {
+  const { teamId, keyId, privateKey, bundleId } = config.apns
+  return (
+    teamId !== undefined &&
+    keyId !== undefined &&
+    privateKey !== undefined &&
+    bundleId !== undefined
+  )
 }

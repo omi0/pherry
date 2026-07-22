@@ -298,7 +298,41 @@ Either way, the relay only ever sees ciphertext — the session content is E2EE 
 
 ---
 
-## 7. Teardown
+## 7. The iOS app
+
+The **iOS app** (`ios/Pherry`, P3c) is the phone half — it reaches a session over the same blind
+relay, E2EE, and mirrors it in a real terminal. Full build notes live in
+[`../ios/README.md`](../ios/README.md); here is the local simulator loop.
+
+```bash
+cd ios
+xcodegen generate                 # writes Pherry.xcodeproj (gitignored) from project.yml
+open Pherry.xcodeproj             # then Run (⌘R) on any iPhone simulator
+```
+
+With the stack up (`make up`, or §1–§5 by hand) and a host docked (`pherry dock`, or the
+dashboard's **Pair phone** modal), pair the app:
+
+- **The Simulator has no camera**, so you can't scan the QR. Instead copy the `pherry://pair?…`
+  link — it's printed by `pherry dock` and encoded in the dashboard's Pair modal QR — and paste it
+  into the app: **Hosts → Dock a host → Paste a link instead**.
+- If the link carries no `&api=…` (older `dock` output), the app asks for the control-plane URL
+  once and remembers it — use `http://127.0.0.1:3000` for the local stack.
+
+Then **Hosts → the host → a session → the terminal**: the same `sessions.list` / `subscribe` /
+`input` / `resize` wire as `pherry attach`, rendered in SwiftTerm. Raise an attention event
+(`pherry attention raise …`) and it lands in the app's **Inbox** within a few seconds, exactly as
+in the dashboard.
+
+> **Push and the ring need a physical device.** APNs alerts and the PushKit-VoIP → CallKit ring
+> can't be exercised on the Simulator: they require a signed build on a real iPhone **and** APNs
+> credentials configured on the control plane (the `APNS_*` knobs — see
+> [`deploying.md`](./deploying.md) → *APNs (the push + ring channels)*). Without those knobs the
+> push/ring channels degrade to logging stubs and the in-app inbox still works.
+
+---
+
+## 8. Teardown
 
 ```bash
 pherry serve --stop           # stop the docked daemon

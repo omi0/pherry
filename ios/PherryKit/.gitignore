@@ -1,0 +1,7 @@
+# SwiftPM build artifacts
+.build/
+# Xcode / SwiftPM local state
+.swiftpm/
+*.xcodeproj
+DerivedData/
+Package.resolved

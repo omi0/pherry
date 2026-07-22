@@ -13,7 +13,7 @@
 import { timingSafeEqual } from 'node:crypto'
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
-import type { HumanPrincipal } from '../services/auth.js'
+import type { DevicePrincipal, HumanPrincipal } from '../services/auth.js'
 import { authenticateDevice, authenticateHost, authenticateHuman } from '../services/auth.js'
 
 /** The uniform error body every route emits: `{ error: { code, message } }`. */
@@ -92,6 +92,23 @@ export async function requireHost(request: FastifyRequest, reply: FastifyReply) 
   const principal = await authenticateHost(request.server.db, request.headers.authorization)
   if (principal === null) {
     sendError(reply, 401, 'unauthenticated', 'a valid host credential is required')
+    return null
+  }
+  return principal
+}
+
+/**
+ * Guard a route to a device `dt_` principal. Returns the {@link DevicePrincipal}, or
+ * sends `401` `unauthenticated` and returns `null`. The narrow sibling of
+ * {@link requireDeviceOrHuman} for routes only a device may call (push-token registration).
+ */
+export async function requireDevice(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<DevicePrincipal | null> {
+  const principal = await authenticateDevice(request.server.db, request.headers.authorization)
+  if (principal === null) {
+    sendError(reply, 401, 'unauthenticated', 'a valid device token is required')
     return null
   }
   return principal

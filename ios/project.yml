@@ -1,0 +1,102 @@
+name: Pherry
+
+# The committed source of truth for the Xcode project. Regenerate with `xcodegen generate`
+# (the resulting Pherry.xcodeproj is gitignored — never edit it by hand). Signing is the
+# operator's problem: the CI build is unsigned, and the bundle id below is a placeholder to change.
+
+options:
+  bundleIdPrefix: dev.pherry
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    # The one knob an operator flips before signing for their own account.
+    PHERRY_BUNDLE_ID: dev.pherry.app
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "6.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+
+packages:
+  PherryKit:
+    path: PherryKit
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    from: "1.2.0"
+
+targets:
+  Pherry:
+    type: application
+    platform: iOS
+    sources:
+      - path: Pherry
+        excludes:
+          - "Info.plist"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(PHERRY_BUNDLE_ID)
+        PRODUCT_NAME: Pherry
+        CODE_SIGN_ENTITLEMENTS: Pherry/Pherry.entitlements
+        SWIFT_STRICT_CONCURRENCY: complete
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_USER_SCRIPT_SANDBOXING: "YES"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: "YES"
+    info:
+      path: Pherry/Info.plist
+      properties:
+        CFBundleDisplayName: Pherry
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIBackgroundModes:
+          - voip
+          - remote-notification
+        NSCameraUsageDescription: Pherry scans a pairing QR to dock a host.
+        ITSAppUsesNonExemptEncryption: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        CFBundleURLTypes:
+          - CFBundleURLName: $(PHERRY_BUNDLE_ID)
+            CFBundleURLSchemes:
+              - pherry
+    dependencies:
+      - package: PherryKit
+        product: PherryKit
+      - package: SwiftTerm
+        product: SwiftTerm
+
+  PherryTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - PherryTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(PHERRY_BUNDLE_ID).tests
+        SWIFT_STRICT_CONCURRENCY: complete
+        GENERATE_INFOPLIST_FILE: "YES"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Pherry.app/Pherry"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+    dependencies:
+      - target: Pherry
+
+schemes:
+  Pherry:
+    build:
+      targets:
+        Pherry: all
+        PherryTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - PherryTests

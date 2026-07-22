@@ -1,0 +1,23 @@
+{
+  "description": "relayChannelContext(hostId, ticket)",
+  "cases": [
+    {
+      "description": "host_00000000000000000000000000000001 / tkt_0000000000000000000000000000abcd",
+      "hostId": "host_00000000000000000000000000000001",
+      "ticket": "tkt_0000000000000000000000000000abcd",
+      "contextHex": "6838997d7b04c4b36e40b4b7a4a6c3d1a7c5a1753448fe3bcf7334d2658fc6b7"
+    },
+    {
+      "description": "host_ffffffffffffffffffffffffffffffff / tkt_ffffffffffffffffffffffffffffffff",
+      "hostId": "host_ffffffffffffffffffffffffffffffff",
+      "ticket": "tkt_ffffffffffffffffffffffffffffffff",
+      "contextHex": "245327a2e4391dc2711566da11d8dd473f9bdfc620a8d4e29a0a2ed63d70f677"
+    },
+    {
+      "description": "host_a1b2c3 / tkt_deadbeef",
+      "hostId": "host_a1b2c3",
+      "ticket": "tkt_deadbeef",
+      "contextHex": "dfe02e3e3709c3209bee87c535b712ec229bd4c07b77fae5ac49a5911ffb69b1"
+    }
+  ]
+}

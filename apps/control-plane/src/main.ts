@@ -4,13 +4,15 @@
  * with injected deps). Building it must not require any env vars set; it reads
  * them at runtime.
  */
+import { makeApnsPushSender } from './adapters/apns.js'
 import { makeClerkIdentity } from './adapters/clerk.js'
 import { makeIoredis } from './adapters/redis.js'
 import type { Config } from './config.js'
-import { loadConfig } from './config.js'
+import { apnsConfigured, loadConfig } from './config.js'
 import { makeDb } from './db/client.js'
 import type { IdentityProvider } from './identity.js'
 import { DevIdentityProvider, selectIdentity } from './identity.js'
+import type { PushSender } from './push.js'
 import { buildServer } from './server.js'
 
 /**
@@ -28,6 +30,21 @@ function makeIdentity(config: Config): IdentityProvider {
   return makeClerkIdentity(config)
 }
 
+/**
+ * Build the real APNs {@link PushSender} only when the whole credential set is present
+ * (logging one boot line naming the environment + bundle id — **never** the key). An
+ * incomplete set returns `undefined`, so the channel registry degrades to the honest
+ * logging stubs exactly as in P3a.
+ */
+function makePushSender(config: Config): PushSender | undefined {
+  if (!apnsConfigured(config)) return undefined
+  console.log(
+    `APNs push sender active — environment=${config.apns.environment} ` +
+      `bundle=${config.apns.bundleId}`,
+  )
+  return makeApnsPushSender(config.apns)
+}
+
 /** Load config, construct the real adapters, and start listening. */
 async function main(): Promise<void> {
   const config = loadConfig(process.env)
@@ -37,7 +54,14 @@ async function main(): Promise<void> {
   const db = makeDb(config.databaseUrl)
   const redis = makeIoredis(config.redisUrl)
   const identity = makeIdentity(config)
-  const app = buildServer({ db, redis, identity, config })
+  const pushSender = makePushSender(config)
+  const app = buildServer({
+    db,
+    redis,
+    identity,
+    config,
+    ...(pushSender !== undefined ? { pushSender } : {}),
+  })
 
   const port = Number(process.env.PORT ?? '3000')
   const host = process.env.HOST ?? '0.0.0.0'

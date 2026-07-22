@@ -1,0 +1,18 @@
+# Authoritative ignore for the whole ios/ subtree — keeps generated Xcode/SwiftPM artifacts out of
+# git (and out of the JS tooling's sight). XcodeGen's project.yml is the committed source of truth;
+# everything it produces is regenerated, never tracked.
+
+# XcodeGen output (regenerate with `xcodegen generate`)
+*.xcodeproj
+
+# The Info.plist is generated from project.yml's `info:` block
+Pherry/Info.plist
+
+# SwiftPM + Xcode build state
+.build/
+DerivedData/
+xcuserdata/
+.swiftpm/
+Package.resolved
+
+.DS_Store
