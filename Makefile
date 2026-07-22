@@ -16,7 +16,7 @@ DEV     := scripts/dev.sh
 CP      := @pherry/control-plane
 CP_ENV  := apps/control-plane/.env
 
-.PHONY: help bootstrap build up dev down restart status logs stop-apps \
+.PHONY: help bootstrap build link up dev down restart status logs stop-apps \
 	migrate seed test verify fmt compose-up compose-down
 
 ## help: list available targets
@@ -36,6 +36,16 @@ bootstrap:
 build:
 	@echo "==> pnpm -r build"
 	$(PNPM) -r build
+
+## link: install a `pherry` wrapper into a PATH bin dir (BINDIR=/opt/homebrew/bin)
+# A dev-machine stand-in for a real release: `pherry` resolves everywhere without
+# aliases, and the wrapper execs the built CLI so it survives rebuilds. Remove
+# with `rm $(BINDIR)/pherry`.
+BINDIR ?= /opt/homebrew/bin
+link:
+	@printf '#!/bin/sh\nexec node %s/packages/cli/dist/bin/pherry.js "$$@"\n' "$(CURDIR)" > $(BINDIR)/pherry
+	@chmod +x $(BINDIR)/pherry
+	@echo "==> linked $(BINDIR)/pherry -> packages/cli/dist/bin/pherry.js"
 
 # ---------------------------------------------------------------------------
 # up / dev / down / restart / status / logs / stop-apps — dev orchestration
