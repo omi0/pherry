@@ -16,6 +16,11 @@
  * they are current as of — and then the live frame stream continues from there.
  * This is the same mechanism whether the session was born from `pherry run`, from
  * a hand-launched terminal adopted under custody, or in a cloud sandbox.
+ *
+ * Because every viewer is equal but the PTY has exactly one size, the session
+ * also owns the **sizing policy** (viewport authority): the most recent resizer
+ * drives the size while attached, and its departure restores the latest
+ * remaining viewer's viewport. See the "Sizing policy" section below.
  */
 import { PtyOpcode, encodeExitPayload, encodePtyFrame, encodeSizePayload } from '@pherry/protocol'
 import type { SessionRef } from '@pherry/protocol'
@@ -77,6 +82,13 @@ export class Session {
   #endedSeq = 0
   #disposed = false
   #lastWriter: string | undefined
+
+  // Viewport authority (see the "sizing policy" section below): each viewer's
+  // last-known viewport, a monotonic recency tick, and who the PTY's current
+  // size belongs to.
+  readonly #viewports = new Map<symbol, { cols: number; rows: number; at: number }>()
+  #viewportTick = 0
+  #sizeAuthority: symbol | null = null
 
   constructor(options: SessionOptions) {
     this.#ref = options.ref
@@ -183,6 +195,75 @@ export class Session {
     this.#backend.resize(this.#handle, cols, rows)
     this.#mirror.resize(cols, rows)
     this.#broadcast(PtyOpcode.Resized, encodeSizePayload({ cols, rows }))
+  }
+
+  // --- Sizing policy (viewport authority) ----------------------------------
+  //
+  // One PTY has exactly one size, so when a phone and a laptop view the same
+  // session they cannot each get their own layout — the honest question is who
+  // the size *belongs to* right now, and what happens when they leave. The
+  // policy (mirroring Orca's "mobile drives dims while subscribed; desktop
+  // restores on last-leave"):
+  //
+  //  - a subscribe **observes** a viewer's viewport (recorded, never applied);
+  //  - a resize **claims** — the PTY takes that viewer's size and the viewer
+  //    becomes the size authority (last-writer-wins while both are attached);
+  //  - a departure **restores** — if the leaver held authority, the PTY snaps
+  //    back to the most recently recorded viewport of the viewers still
+  //    attached, so a phone peeking at a laptop session never leaves the
+  //    laptop's TUI stuck at phone width.
+  //
+  // Viewers are keyed by an opaque `symbol` minted per served connection, and
+  // recency is a monotonic tick (never wall clock), so the policy is
+  // deterministic under test.
+
+  /**
+   * Record `viewer`'s viewport without resizing — a subscribe carries the
+   * controller's viewport as an observation, not a claim (`resizeViewer` is the
+   * claim). The record is what a later {@link Session.releaseViewer} restores to.
+   */
+  observeViewer(viewer: symbol, cols: number, rows: number): void {
+    this.#viewports.set(viewer, { cols, rows, at: ++this.#viewportTick })
+  }
+
+  /**
+   * Apply `viewer`'s resize and make it the size authority. The PTY follows the
+   * most recent resizer while viewers overlap (last-writer-wins); the record it
+   * leaves behind is what a peer's departure restores.
+   */
+  resizeViewer(viewer: symbol, cols: number, rows: number): void {
+    this.#viewports.set(viewer, { cols, rows, at: ++this.#viewportTick })
+    this.#sizeAuthority = viewer
+    this.resize(cols, rows)
+  }
+
+  /**
+   * Forget `viewer` (its subscription ended or its connection dropped). If it
+   * held the size authority, restore the PTY to the most recently recorded
+   * viewport among the viewers still attached — the "desktop snaps back when
+   * the phone leaves" half of the policy. With no recorded viewport left, the
+   * size simply stays (nobody is waiting behind the leaver).
+   */
+  releaseViewer(viewer: symbol): void {
+    const hadRecord = this.#viewports.delete(viewer)
+    if (this.#sizeAuthority !== viewer) return
+    this.#sizeAuthority = null
+    if (!hadRecord) return
+    let heir: symbol | null = null
+    let best = -1
+    for (const [candidate, record] of this.#viewports) {
+      if (record.at > best) {
+        best = record.at
+        heir = candidate
+      }
+    }
+    if (heir === null) return
+    const record = this.#viewports.get(heir)
+    if (record === undefined) return
+    this.#sizeAuthority = heir
+    if (record.cols !== this.#cols || record.rows !== this.#rows) {
+      this.resize(record.cols, record.rows)
+    }
   }
 
   /**

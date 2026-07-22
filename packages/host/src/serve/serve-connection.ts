@@ -14,7 +14,11 @@
  *    as a {@link binaryFrame} and sends it; the ack (carrying `streamId` /
  *    `snapshotSeq`) is sent **first**, so the controller learns the stream id
  *    before the snapshot frames arrive.
- *  - `session.input` / `session.resize` drive the session and reply `Ack`.
+ *  - `session.input` / `session.resize` drive the session and reply `Ack`. A
+ *    resize is **attributed** to this connection's viewer, and an unsubscribe /
+ *    connection close **releases** it — so when a phone that resized the PTY
+ *    leaves, the session restores the remaining viewer's size (the sizing
+ *    policy lives in `session.ts`).
  *  - `session.unsubscribe` tears the subscription down and replies `Ack`.
  *  - `custody.reserve` / `custody.claim` / `sessions.list` are served only when
  *    the matching {@link ServeConnectionOptions} hook is injected; otherwise they
@@ -44,6 +48,7 @@ import {
 } from '@pherry/protocol'
 import { CustodyError } from '../custody/open.js'
 import type { SessionRegistry } from '../session/registry.js'
+import type { Session } from '../session/session.js'
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -52,6 +57,8 @@ const decoder = new TextDecoder()
 interface Subscription {
   readonly streamId: number
   readonly unsubscribe: () => void
+  /** The session, retained so departure can release this viewer's viewport. */
+  readonly session: Session
 }
 
 /**
@@ -116,22 +123,41 @@ export function serveConnection(
   options: ServeConnectionOptions = {},
 ): ServedConnection {
   const subscriptions = new Map<SessionRef, Subscription>()
+  // This connection's viewer identity for the sizing policy (§ session.ts):
+  // one terminal sits behind one connection, so viewport observation, resize
+  // attribution, and departure-restore all key off this symbol. `touched` is
+  // every session this viewer observed or resized — a resize does not require a
+  // subscription, so connection close releases across the superset, never
+  // leaving a dangling size authority.
+  const viewer = Symbol('pherry-viewer')
+  const touched = new Set<Session>()
   let closed = false
 
   const send = (frame: RpcSuccess | RpcError): void => {
     if (!closed) channel.send(controlFrame(encoder.encode(JSON.stringify(frame))))
   }
 
-  const teardown = (ref: SessionRef): void => {
+  /**
+   * Drop a subscription. `departed` distinguishes a real departure (unsubscribe
+   * / connection close — release the viewport so a peer's size is restored)
+   * from a same-connection re-subscribe (the viewer is staying; its viewport
+   * record must survive the sink swap).
+   */
+  const teardown = (ref: SessionRef, departed: boolean): void => {
     const sub = subscriptions.get(ref)
     if (!sub) return
     subscriptions.delete(ref)
     sub.unsubscribe()
+    if (departed) sub.session.releaseViewer(viewer)
   }
 
   const teardownAll = (): void => {
     for (const sub of subscriptions.values()) sub.unsubscribe()
     subscriptions.clear()
+    // Release over the touched superset: a resize needs no subscription, and
+    // releaseViewer is idempotent for viewers already released.
+    for (const session of touched) session.releaseViewer(viewer)
+    touched.clear()
   }
 
   const handleSubscribe = (id: string, params: ParamsOf<'session.subscribe'>): void => {
@@ -141,15 +167,20 @@ export function serveConnection(
       return
     }
     // A re-subscribe replaces the prior subscription for the same session, so a
-    // connection never holds two sinks on one session.
-    teardown(params.sessionRef)
+    // connection never holds two sinks on one session. The viewer is staying,
+    // so its viewport record survives the swap (departed: false).
+    teardown(params.sessionRef, false)
+    // The subscribe viewport is an observation, never a claim: it records what
+    // this viewer would restore to, without touching the live PTY size.
+    if (params.viewport) session.observeViewer(viewer, params.viewport.cols, params.viewport.rows)
+    touched.add(session)
     // Ack first (announcing binary frames), then attach the sink: the snapshot
     // frames the sink emits synchronously thus follow the ack on the wire.
     send(success(id, { streamId: session.streamId, snapshotSeq: session.seq }, { stream: true }))
     const unsubscribe = session.subscribe((frame) => {
       if (!closed) channel.send(binaryFrame(frame))
     })
-    subscriptions.set(params.sessionRef, { streamId: session.streamId, unsubscribe })
+    subscriptions.set(params.sessionRef, { streamId: session.streamId, unsubscribe, session })
   }
 
   const handleInput = (id: string, params: ParamsOf<'session.input'>): void => {
@@ -168,12 +199,15 @@ export function serveConnection(
       send(failure(id, ErrorCode.NotFound, `no such session: ${params.sessionRef}`))
       return
     }
-    session.resize(params.cols, params.rows)
+    // Attributed: this viewer claims the size (and a peer's later departure
+    // will restore to the most recent remaining viewport — see session.ts).
+    session.resizeViewer(viewer, params.cols, params.rows)
+    touched.add(session)
     send(success(id, { ok: true }))
   }
 
   const handleUnsubscribe = (id: string, params: ParamsOf<'session.unsubscribe'>): void => {
-    teardown(params.sessionRef)
+    teardown(params.sessionRef, true)
     send(success(id, { ok: true }))
   }
 
