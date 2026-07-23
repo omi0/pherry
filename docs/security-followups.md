@@ -9,6 +9,14 @@ shape of the eventual fix. It also lists the findings that were verified as **by
 The hardening pass itself (what *was* fixed) is in the git history — `fix(security):` —
 and every item there ships with tests; the full verify gate is green.
 
+> **Update (2026-07-23).** The four "deferred but actionable" items below have since been
+> implemented on branch `security/deferred-fixes` (commits `c37b57d` H7, `faf5d6f` H2,
+> `fb87378` M19, `736de64`+`50698bd` M22, `d62ef2f` review follow-ups). Each carries a
+> **Status** line recording what actually landed — including H2's residual and the part of
+> H7 that stays operational. The full JS gate (`make verify`) and the iOS gate
+> (`swift test`, 41 tests) are green on that branch. Independent adversarial review found no
+> critical/high/medium issue in any of the four.
+
 ---
 
 ## 1. Deferred but actionable
@@ -37,6 +45,23 @@ the gap cleanly. Do each as its own reviewed change.
   control-registration proof on the data leg, verified before splicing; fail closed on mismatch.
   Medium size — `relay-core` cell + host/controller adapters + tests, plus regenerated iOS vectors.
   Until done, keep it documented as an intentional availability risk under a path adversary.
+- **Status: FIXED (with a documented residual)** — commit `faf5d6f`. Registration now derives a
+  data-leg key `k_data = HKDF(dh_proof, salt=nonce_reg, info=".../host-data-auth")` from the *same*
+  DH the host proof already establishes (no extra round-trip, no new key material). Per `conn-open`
+  the cell mints a fresh 32-byte `bridgeNonce`; the host answers its `data-auth` with
+  `HMAC(k_data, cellId ‖ ticket ‖ bridgeNonce)`, which the cell verifies **constant-time before
+  splicing** — a missing/wrong MAC is refused with the new `data-auth-failed` close code and leaves
+  the pending bridge intact so the genuine host still completes it. The controller `data-auth` wire
+  is byte-identical (`macB64` is an optional host-only field), proven by an empty iOS vector diff, so
+  no Swift change was needed. **Residual:** the MAC crosses the cleartext wire, so an *active* on-path
+  MITM who suppresses the genuine host's dial can still replay the host's own in-flight `data-auth`
+  within the splice window — but that is denial-only (content stays sealed by the pinned-static inner
+  channel) and no stronger than that MITM's existing ability to DoS by dropping packets. The
+  passive-observer / `conn-open`-only forgery — the actual pre-fix hole — is fully shut. Fully
+  closing the residual needs the heavier option (encrypting the outer protocol, or a data-leg
+  challenge-response with an extra round-trip); deliberately not taken here.
+  **Deploy coupling:** this is a wire change on the host↔cell legs — roll the relay cell and the CLI
+  host daemon together (no mixed old/new host vs. cell); controllers are unaffected.
 
 ### M19 — Transport backpressure (raw buffer + ignored `socket.write` return)
 
@@ -53,6 +78,21 @@ the gap cleanly. Do each as its own reviewed change.
 - **Fix shape.** Bounded buffer with close-on-exceed; pause fan-out when `write()` returns false and
   resume on `drain`; socket high-water marks; then a load test. Touches `transport-node`,
   `relay-core`, and the host mirror fan-out.
+- **Status: FIXED** — commit `fb87378`. Backpressure is added as **optional, feature-detected**
+  `Duplex` members (`writable` / `onDrain`, mirroring the existing `onPeerClose` detection), so no
+  `Duplex` implementer breaks and the iOS `ByteTransport` needs no change. `node-socket.ts` tracks
+  `write()`'s boolean and fires `onDrain` on the socket `'drain'`; `unix.ts` sets a 1 MiB socket
+  high-water mark. The host fan-out is now **per-subscriber**: a stalled sink is paused *alone*
+  (peers keep receiving), records the gap, and on drain is resynced with a `Gap` frame + fresh
+  snapshot at the current seq (the same catch-up a late joiner gets) — so a paused viewer is O(1)
+  session-side and cannot grow host memory. A transport with no writability signal reports
+  always-writable, so the happy path is byte-for-byte unchanged. `relay-core/outer-frame.ts` also
+  caps the pre-handler `#rawBuffer` at 16 KiB as defence-in-depth. No wire bytes changed. The "load
+  test" is a deterministic simulation (a fake duplex whose writability toggles), not a flaky
+  time/network test. **Known low-severity edge:** a sink paused *exactly at backend exit* renders a
+  stale final screen before `ended` (the guarantee is "exit delivered", not "final frame delivered");
+  forcing a full snapshot to an over-HWM socket would violate the O(1) bound. Left as documented
+  behaviour.
 
 ### M22 — Protocol `Hello` / capability negotiation is defined but dormant
 
@@ -92,6 +132,21 @@ the gap cleanly. Do each as its own reviewed change.
   internet-reachable, an attacker can burn live tickets and read host public keys.
 - **Fix shape.** Separate internal listener (or platform private networking / mTLS) at deploy time.
   Documented as a hard deploy rule in [`deploying.md`](./deploying.md); enforce in infra.
+- **Status: code half FIXED; infra half is now opt-in and documented** — commit `c37b57d`.
+  (a) The boot guard now **requires** `INTERNAL_API_KEY` in production — *undefined* or `< 32` chars
+  both throw at boot (previously an unset key booted and the routes silently `503`'d). (b) The relay's
+  `CONTROL_PLANE_URL` must be an absolute `http(s)` URL, and under `NODE_ENV=production` a non-https
+  URL is **refused** unless the host is loopback — so the shared secret can no longer travel cleartext
+  to a public host (the dev default `http://127.0.0.1:3000` still works). (c) A new optional
+  `INTERNAL_LISTEN_PORT` / `INTERNAL_LISTEN_HOST`: when set, `/internal/relay/*` is **omitted from the
+  public app** and served by a separate listener bound to a private interface (default `127.0.0.1`);
+  when unset, the single-listener topology is byte-identical to before, so existing deploys are
+  unaffected. `deploying.md` gained an "Isolating the internal API" section. **What remains
+  operational:** actually setting `INTERNAL_LISTEN_*` (or platform private networking / mTLS) at
+  deploy time — the code now makes the private topology available and fails closed on a cleartext
+  public URL, but a deploy that leaves the port unset still serves the routes on the public edge
+  (behind the required strong key). Note the behaviour change: a production control plane now **must**
+  set a ≥32-char `INTERNAL_API_KEY` or it refuses to boot.
 
 ---
 
@@ -129,11 +184,19 @@ are not re-opened; see `securityfindings.md` for the full reasoning.
 
 ---
 
-## 4. Suggested order
+## 4. Remaining work
 
-1. **H2** — authenticate the host data dial (highest real risk of the deferred set: ticket-burn DoS).
-2. **H7 network half** — private internal listener / mTLS at deploy.
-3. **M19** — transport backpressure, with a load test.
-4. **M22** — `Hello`/capability negotiation as its own leg (spec first).
-5. **L5** — commission the channel audit before a hosted relay serves real users.
-6. **iOS pass** — M24 / L11 / L12 behind the Swift gate.
+The code changes for H2, M19, M22, and the H7 code half are **done** (branch
+`security/deferred-fixes`, see the Status lines above). What is left is operational / owed
+externally / a separate gate:
+
+1. **H7 deploy step** — set `INTERNAL_LISTEN_PORT`/`INTERNAL_LISTEN_HOST` (or platform private
+   networking / mTLS) in the real deployment so `/internal/relay/*` leaves the public edge. The code
+   now enables and documents this; infra must adopt it.
+2. **H2 full closure (optional)** — only if the documented active-MITM race-window residual must go:
+   encrypt the outer protocol, or add a data-leg challenge-response (extra round-trip). Denial-only
+   today, so low priority.
+3. **L5** — commission the independent `@pherry/channel` audit before a hosted relay serves real users.
+4. **iOS pass** — M24 / L11 / L12 behind the Swift gate (`swift test` + simulator build).
+5. **Merge** — `security/deferred-fixes` is unpushed; review the six commits and merge when ready.
+   H2 is a host↔cell **wire change**: roll the relay cell and CLI host daemon together.
