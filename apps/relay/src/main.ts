@@ -12,32 +12,18 @@
 import { createServer } from 'node:net'
 import { createCell } from '@pherry/relay-core'
 import { nodeSocketDuplex } from '@pherry/transport-node'
-import { z } from 'zod'
 import { makeHttpAuthorizer } from './authorizer.js'
-
-/** The relay's runtime environment, zod-parsed at startup. */
-const EnvSchema = z.object({
-  /** This cell's stable id, bound into every host registration challenge. */
-  CELL_ID: z.string().min(1),
-  /** The interface to bind. Defaults to all interfaces. */
-  LISTEN_HOST: z.string().min(1).default('0.0.0.0'),
-  /** The TCP port to accept host / controller connections on. */
-  LISTEN_PORT: z.coerce.number().int().positive().default(9443),
-  /** The control plane's base URL, for the internal authorizer API. */
-  CONTROL_PLANE_URL: z.string().min(1),
-  /** The shared secret guarding the internal API. */
-  INTERNAL_API_KEY: z.string().min(1),
-})
+import { loadConfig } from './config.js'
 
 /** Parse the env, stand up the cell + its TCP listener, and wire graceful drain. */
 async function main(): Promise<void> {
-  const env = EnvSchema.parse(process.env)
+  const config = loadConfig(process.env)
 
   const authorizer = makeHttpAuthorizer({
-    controlPlaneUrl: env.CONTROL_PLANE_URL,
-    internalApiKey: env.INTERNAL_API_KEY,
+    controlPlaneUrl: config.controlPlaneUrl,
+    internalApiKey: config.internalApiKey,
   })
-  const cell = createCell({ cellId: env.CELL_ID, authorizer })
+  const cell = createCell({ cellId: config.cellId, authorizer })
 
   const server = createServer((socket) => {
     // Swallow post-close socket errors (e.g. EPIPE) so a peer reset never crashes
@@ -46,14 +32,14 @@ async function main(): Promise<void> {
     cell.handleConnection(nodeSocketDuplex(socket))
   })
 
-  await new Promise<void>((resolve) => server.listen(env.LISTEN_PORT, env.LISTEN_HOST, resolve))
-  console.log(`relay cell ${env.CELL_ID} listening on ${env.LISTEN_HOST}:${env.LISTEN_PORT}`)
+  await new Promise<void>((resolve) => server.listen(config.listenPort, config.listenHost, resolve))
+  console.log(`relay cell ${config.cellId} listening on ${config.listenHost}:${config.listenPort}`)
 
   let shuttingDown = false
   const shutdown = (signal: string): void => {
     if (shuttingDown) return
     shuttingDown = true
-    console.log(`relay cell ${env.CELL_ID} draining on ${signal}`)
+    console.log(`relay cell ${config.cellId} draining on ${signal}`)
     cell.drain()
     server.close(() => {
       cell.close()

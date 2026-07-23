@@ -13,7 +13,8 @@ import { makeDb } from './db/client.js'
 import type { IdentityProvider } from './identity.js'
 import { DevIdentityProvider, selectIdentity } from './identity.js'
 import type { PushSender } from './push.js'
-import { buildServer } from './server.js'
+import type { ServerDeps } from './server.js'
+import { buildInternalServer, buildServer } from './server.js'
 
 /**
  * Resolve the identity provider from config: the Clerk adapter, or — for dev/self-host
@@ -58,17 +59,28 @@ async function main(): Promise<void> {
   const redis = makeIoredis(config.redisUrl)
   const identity = makeIdentity(config)
   const pushSender = makePushSender(config)
-  const app = buildServer({
+  const deps: ServerDeps = {
     db,
     redis,
     identity,
     config,
     ...(pushSender !== undefined ? { pushSender } : {}),
-  })
+  }
+  const app = buildServer(deps)
 
   const port = Number(process.env.PORT ?? '3000')
   const host = process.env.HOST ?? '0.0.0.0'
   await app.listen({ port, host })
+
+  // §H7c: when a private internal listener is configured, the public app above omits the
+  // `/internal/relay/*` routes; serve them from a second instance bound to the private
+  // interface (default loopback) so the relay's shared-secret seam is off the public edge.
+  if (config.internalListenPort !== undefined) {
+    const internalApp = buildInternalServer(deps)
+    const bind = `${config.internalListenHost}:${config.internalListenPort}`
+    await internalApp.listen({ port: config.internalListenPort, host: config.internalListenHost })
+    console.log(`internal relay API on ${bind} (omitted from the public app)`)
+  }
 }
 
 main().catch((error) => {

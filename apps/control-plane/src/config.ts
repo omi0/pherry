@@ -101,6 +101,23 @@ export interface Config {
   /** Shared secret guarding the internal relay-validate route (relay → control plane). */
   readonly internalApiKey: string | undefined
   /**
+   * The port for a **separate, private** listener that serves ONLY the `/internal/relay/*`
+   * routes. When set, {@link buildServer} OMITS those routes from the public app and
+   * `main.ts` binds a second Fastify instance (see {@link buildInternalServer}) to
+   * {@link internalListenHost}:`internalListenPort` — so the relay↔control-plane seam
+   * lives on a private interface, never the public edge. Blank (the default) keeps the
+   * legacy single-listener topology: the internal routes ride the public app, guarded
+   * only by {@link internalApiKey}. Optional, so existing deploys are unaffected.
+   */
+  readonly internalListenPort: number | undefined
+  /**
+   * The interface the private internal listener binds when {@link internalListenPort}
+   * is set. Defaults to `127.0.0.1` (loopback — reachable only by a co-located relay or
+   * over the platform's private network via an explicit bind); set it to the private-network
+   * interface when the relay runs on a different host. Ignored when the port is unset.
+   */
+  readonly internalListenHost: string
+  /**
    * Fastify's `trustProxy` setting: `false` (default) trusts no proxy, `true` trusts
    * every hop, and a non-negative integer trusts exactly that many proxy hops. It
    * governs how `request.ip` is derived from `X-Forwarded-For`, so the per-IP rate
@@ -163,6 +180,11 @@ const EnvSchema = z.object({
   API_PUBLIC_URL: z.string().min(1).optional(),
   DASHBOARD_URL: z.string().min(1).optional(),
   INTERNAL_API_KEY: z.string().min(1).optional(),
+  // The private internal listener (§H7c). Port unset → legacy single-listener topology
+  // (internal routes on the public app). Host defaults to loopback; only consulted when a
+  // port is given. A blank port normalises to undefined; a set port must be a positive int.
+  INTERNAL_LISTEN_PORT: z.coerce.number().int().positive().optional(),
+  INTERNAL_LISTEN_HOST: z.string().min(1).default('127.0.0.1'),
   // A boolean (`true`/`false`) or a non-negative proxy hop-count integer; blank → false.
   TRUST_PROXY: z
     .string()
@@ -241,6 +263,8 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     dashboardUrl:
       parsed.DASHBOARD_URL !== undefined ? trimTrailingSlash(parsed.DASHBOARD_URL) : undefined,
     internalApiKey: parsed.INTERNAL_API_KEY,
+    internalListenPort: parsed.INTERNAL_LISTEN_PORT,
+    internalListenHost: parsed.INTERNAL_LISTEN_HOST,
     trustProxy: parsed.TRUST_PROXY,
     maxHostsPerOrg: parsed.MAX_HOSTS_PER_ORG,
     allowDevIdentity: parsed.ALLOW_DEV_IDENTITY === '1',
@@ -293,10 +317,12 @@ const MIN_INTERNAL_API_KEY_LENGTH = 32
  * Enforce the production-only invariants that must **fail the boot** rather than
  * degrade — grouped here so the `NODE_ENV === 'production'` gate is read exactly once:
  *
- * - a set `INTERNAL_API_KEY` must be at least {@link MIN_INTERNAL_API_KEY_LENGTH}
- *   characters — the `/internal/relay/*` routes are only as strong as this shared
- *   secret, so a short, guessable key in prod is refused (the zod `.min(1)` stays
- *   loose so dev/test may use short keys);
+ * - `INTERNAL_API_KEY` is **required** and must be at least
+ *   {@link MIN_INTERNAL_API_KEY_LENGTH} characters. The `/internal/relay/*` routes are
+ *   the relay's authorizer and are gated **only** by this shared secret, so an unset key
+ *   would silently `503` every relay call (breaking authorization), and a short one is
+ *   guessable — both are refused at boot (the zod `.min(1)` stays loose so dev/test may
+ *   use short/absent keys);
  * - the single-shared-secret dev identity provider (`DEV_HUMAN_TOKEN`) must not boot
  *   in prod unless the operator opts in explicitly with `ALLOW_DEV_IDENTITY=1`.
  *
@@ -305,10 +331,13 @@ const MIN_INTERNAL_API_KEY_LENGTH = 32
  */
 export function validateProductionConfig(config: Config): void {
   if (config.nodeEnv !== 'production') return
-  if (
-    config.internalApiKey !== undefined &&
-    config.internalApiKey.length < MIN_INTERNAL_API_KEY_LENGTH
-  ) {
+  if (config.internalApiKey === undefined) {
+    throw new Error(
+      'INTERNAL_API_KEY is required in production — the /internal/relay/* routes have no ' +
+        'other guard; set a strong shared secret (matching the relay) to boot',
+    )
+  }
+  if (config.internalApiKey.length < MIN_INTERNAL_API_KEY_LENGTH) {
     throw new Error(
       `INTERNAL_API_KEY must be at least ${MIN_INTERNAL_API_KEY_LENGTH} characters in production`,
     )

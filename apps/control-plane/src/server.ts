@@ -7,6 +7,13 @@
  * It registers the audience routers (`routers/{user,pairing,host,relay,internal,
  * webhooks}`) onto this same assembly; each reads the decorated deps off the
  * instance (`app.db`, `app.redis`, `app.identity`, `app.appConfig`, `app.now`).
+ *
+ * **Internal-route topology (§H7c).** The `/internal/relay/*` seam is the relay's
+ * authorizer, guarded only by `INTERNAL_API_KEY`. By default it rides this public app
+ * (legacy single-listener deploys). When `config.internalListenPort` is set, {@link
+ * buildServer} OMITS those routes and `main.ts` serves them from a separate {@link
+ * buildInternalServer} bound to a private interface — so the shared-secret seam is never
+ * reachable at the public edge.
  */
 import cors from '@fastify/cors'
 import Fastify from 'fastify'
@@ -76,17 +83,12 @@ declare module 'fastify' {
 const HealthResponse = z.object({ ok: z.literal(true) })
 
 /**
- * Build a configured — but not yet listening — Fastify instance with the deps
- * decorated on and `GET /healthz` registered. Call `app.ready()` (or `app.inject`)
- * before use; `main.ts` calls `app.listen`.
+ * Decorate the injected deps every router reads off the instance (`app.db`,
+ * `app.redis`, `app.identity`, `app.appConfig`, `app.now`, `app.attentionChannels`).
+ * Shared by {@link buildServer} and {@link buildInternalServer} so both listeners
+ * expose the identical dependency surface.
  */
-export function buildServer(deps: ServerDeps): FastifyInstance {
-  // `trustProxy` decides how `request.ip` is derived from `X-Forwarded-For`. The per-IP
-  // rate limits key on `request.ip`, so behind a proxy this MUST match the real hop count
-  // — otherwise every client collapses into one bucket (or a spoofed header wins). Default
-  // false (trust nothing) for a directly-exposed deploy; set it to the known proxy depth.
-  const app = Fastify({ logger: false, trustProxy: deps.config.trustProxy })
-
+function decorateDeps(app: FastifyInstance, deps: ServerDeps): void {
   app.decorate('db', deps.db)
   app.decorate('redis', deps.redis)
   app.decorate('identity', deps.identity)
@@ -96,6 +98,25 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     'attentionChannels',
     deps.attentionChannels ?? buildAttentionChannels({ db: deps.db, sender: deps.pushSender }),
   )
+}
+
+/**
+ * Build a configured — but not yet listening — Fastify instance with the deps
+ * decorated on and `GET /healthz` registered. Call `app.ready()` (or `app.inject`)
+ * before use; `main.ts` calls `app.listen`.
+ *
+ * The `/internal/relay/*` routes are registered here **only** when no private internal
+ * listener is configured (`config.internalListenPort` unset); otherwise they move to
+ * {@link buildInternalServer} and are absent from this public app.
+ */
+export function buildServer(deps: ServerDeps): FastifyInstance {
+  // `trustProxy` decides how `request.ip` is derived from `X-Forwarded-For`. The per-IP
+  // rate limits key on `request.ip`, so behind a proxy this MUST match the real hop count
+  // — otherwise every client collapses into one bucket (or a spoofed header wins). Default
+  // false (trust nothing) for a directly-exposed deploy; set it to the known proxy depth.
+  const app = Fastify({ logger: false, trustProxy: deps.config.trustProxy })
+
+  decorateDeps(app, deps)
 
   // CORS is registered ONLY when the dashboard URL is configured — its browser half
   // is the sole cross-origin caller. Unset → no plugin at all (same-origin only, as
@@ -118,10 +139,32 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   app.register(cliAuthRoutes)
   app.register(hostRoutes)
   app.register(relayRoutes)
-  app.register(internalRoutes)
+  // The relay↔control-plane seam rides the public app only in the legacy single-listener
+  // topology. When a private internal listener is configured, these routes are served
+  // exclusively by buildInternalServer, keeping the shared-secret surface off the edge.
+  if (deps.config.internalListenPort === undefined) {
+    app.register(internalRoutes)
+  }
   app.register(attentionRoutes)
   app.register(deviceRoutes)
   app.register(webhooksRoutes)
 
+  return app
+}
+
+/**
+ * Build the **private internal listener** — a separate, not-yet-listening Fastify
+ * instance serving ONLY the `/internal/relay/*` routes (no public audience routers, no
+ * CORS, no `/healthz`). `main.ts` binds it to `config.internalListenHost:internalListenPort`
+ * so the relay's shared-secret authorizer seam lives on a private interface rather than
+ * the public edge. Used only when `config.internalListenPort` is set; the same
+ * `INTERNAL_API_KEY` guard still applies (defence in depth, not instead of).
+ */
+export function buildInternalServer(deps: ServerDeps): FastifyInstance {
+  // trustProxy is irrelevant here (no per-IP limits on the internal seam) but is set
+  // consistently with the public app so `request.ip` derives identically if ever read.
+  const app = Fastify({ logger: false, trustProxy: deps.config.trustProxy })
+  decorateDeps(app, deps)
+  app.register(internalRoutes)
   return app
 }

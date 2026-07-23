@@ -210,6 +210,31 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ MAX_HOSTS_PER_ORG: '-3' })).toThrow()
   })
 
+  it('leaves the private internal listener off by default (loopback host default)', () => {
+    const config = loadConfig({})
+    expect(config.internalListenPort).toBeUndefined()
+    expect(config.internalListenHost).toBe('127.0.0.1')
+  })
+
+  it('reads INTERNAL_LISTEN_PORT and INTERNAL_LISTEN_HOST', () => {
+    const config = loadConfig({ INTERNAL_LISTEN_PORT: '4100', INTERNAL_LISTEN_HOST: '10.0.0.2' })
+    expect(config.internalListenPort).toBe(4100)
+    expect(config.internalListenHost).toBe('10.0.0.2')
+  })
+
+  it('rejects a non-positive / non-integer INTERNAL_LISTEN_PORT', () => {
+    expect(() => loadConfig({ INTERNAL_LISTEN_PORT: '0' })).toThrow()
+    expect(() => loadConfig({ INTERNAL_LISTEN_PORT: '-1' })).toThrow()
+    expect(() => loadConfig({ INTERNAL_LISTEN_PORT: '1.5' })).toThrow()
+    expect(() => loadConfig({ INTERNAL_LISTEN_PORT: 'abc' })).toThrow()
+  })
+
+  it('treats a blank INTERNAL_LISTEN_PORT as unset (host keeps its default)', () => {
+    const config = loadConfig({ INTERNAL_LISTEN_PORT: '', INTERNAL_LISTEN_HOST: '' })
+    expect(config.internalListenPort).toBeUndefined()
+    expect(config.internalListenHost).toBe('127.0.0.1')
+  })
+
   it('reads NODE_ENV, CLERK_AUDIENCE, and ALLOW_DEV_IDENTITY', () => {
     const config = loadConfig({
       NODE_ENV: 'production',
@@ -228,9 +253,15 @@ describe('loadConfig', () => {
 })
 
 describe('validateProductionConfig', () => {
-  /** Build a config with `env`, overriding NODE_ENV to production for these guards. */
+  /** A valid production internal key (≥32 chars) — the otherwise-required baseline. */
+  const VALID_INTERNAL_KEY = 'x'.repeat(32)
+  /**
+   * Build an **otherwise-valid** production config (NODE_ENV=production + a strong
+   * internal key), overriding individual knobs via `env`. A case that tests the internal
+   * key itself overrides it — including to `undefined` for the now-required check.
+   */
   const prodConfig = (env: Record<string, string | undefined> = {}): Config =>
-    loadConfig({ NODE_ENV: 'production', ...env })
+    loadConfig({ NODE_ENV: 'production', INTERNAL_API_KEY: VALID_INTERNAL_KEY, ...env })
 
   it('is a no-op outside production (short key + dev token both allowed)', () => {
     const config = loadConfig({ INTERNAL_API_KEY: 'short', DEV_HUMAN_TOKEN: 'dev_secret' })
@@ -249,8 +280,16 @@ describe('validateProductionConfig', () => {
     ).not.toThrow()
   })
 
-  it('accepts a production boot with no internal API key set', () => {
-    expect(() => validateProductionConfig(prodConfig({}))).not.toThrow()
+  it('throws in production when the internal API key is unset (now required)', () => {
+    // Previously a missing key booted and let the /internal/relay/* routes 503 to
+    // everyone, silently breaking the relay authorizer. The key is now required in prod.
+    expect(() => validateProductionConfig(prodConfig({ INTERNAL_API_KEY: undefined }))).toThrow(
+      /INTERNAL_API_KEY is required in production/,
+    )
+  })
+
+  it('does not require the internal API key outside production', () => {
+    expect(() => validateProductionConfig(loadConfig({}))).not.toThrow()
   })
 
   it('throws in production when a dev token is set without the explicit opt-in', () => {

@@ -26,7 +26,10 @@ container platform:
 
 - **Control plane** — behind **public HTTPS**. The platform's proxy terminates TLS
   and forwards to container `PORT` (3000). It is a plain HTTP app; let the edge do
-  TLS. DNS: `api.yourdomain` → the control plane.
+  TLS. DNS: `api.yourdomain` → the control plane. Its relay-facing internal API
+  (`/internal/relay/*`) rides this app by default, but the recommended production
+  topology moves it to a **private listener** off the public edge — see
+  [Isolating the internal API](#isolating-the-internal-api).
 - **Relay cell(s)** — a **public, raw-TCP, dial-able** endpoint on 9443. This is
   **not HTTP**: it speaks the outer relay protocol, and the session inside is already
   E2EE by `@pherry/channel`. Any fronting proxy must be **TCP passthrough** — an
@@ -44,8 +47,10 @@ for the full list):
 |---|---|---|
 | `DATABASE_URL` | managed Postgres URL | often needs `?sslmode=require` |
 | `REDIS_URL` | managed Redis URL | `rediss://…` for TLS |
-| `NODE_ENV` | `production` | turns on the boot-time hardening guards below (short internal key, dev identity provider) |
-| `INTERNAL_API_KEY` | a strong shared secret | **must equal the relay's**; **≥32 random bytes in production** (the boot refuses a shorter key when `NODE_ENV=production`) |
+| `NODE_ENV` | `production` | turns on the boot-time hardening guards below (required internal key, dev identity provider) |
+| `INTERNAL_API_KEY` | a strong shared secret | **must equal the relay's**; **required in production and ≥32 random bytes** — the boot refuses a *missing* or shorter key when `NODE_ENV=production` |
+| `INTERNAL_LISTEN_PORT` | unset (default), or a private port e.g. `3001` | when set, `/internal/relay/*` moves to a **separate** listener and is **omitted from the public app** — the recommended hardening (see [Isolating the internal API](#isolating-the-internal-api)); unset keeps the legacy single-listener topology |
+| `INTERNAL_LISTEN_HOST` | `127.0.0.1` (default) | the interface the private internal listener binds; loopback for a co-located relay, or the private-network interface when the relay is on another host. Ignored when `INTERNAL_LISTEN_PORT` is unset |
 | `TRUST_PROXY` | `1` (or your real proxy-hop count) | see [Per-IP rate limits behind a proxy](#per-ip-rate-limits-behind-a-proxy) — leave unset (`false`) only if the container is directly internet-facing |
 | `API_PUBLIC_URL` | `https://api.yourdomain` | this API's own public base URL |
 | `DIRECTOR_URL` | `tcp://relay.yourdomain:9443` | **embedded verbatim** into pairing QRs + relay tickets — this exact string is what hosts/controllers dial, so it must be the relay's public raw-TCP address |
@@ -61,8 +66,9 @@ for the full list):
 | Var | Production value | Notes |
 |---|---|---|
 | `CELL_ID` | a stable per-cell id, e.g. `cell-fra-1` | bound into host-registration challenges |
-| `CONTROL_PLANE_URL` | `https://api.yourdomain` | the internal authorizer API |
+| `CONTROL_PLANE_URL` | `https://api.yourdomain` | the internal authorizer API — **must be an absolute http(s) URL, and must be `https` in production** (a loopback host may use `http` for a co-located sidecar). The shared secret rides every call, so the relay refuses to boot if this would send it in cleartext to a public host |
 | `INTERNAL_API_KEY` | the **same** secret as the control plane | |
+| `NODE_ENV` | `production` | the image already sets this; it turns on the `CONTROL_PLANE_URL` https guard above |
 | `LISTEN_HOST` / `LISTEN_PORT` | `0.0.0.0` / `9443` | image defaults |
 
 ### Clerk (production instance)
@@ -121,18 +127,48 @@ lockstep across the control plane and all cells. The APNs `.p8` is a secret too 
 With `NODE_ENV=production` the control plane runs two **boot-time guards** — it refuses
 to start (rather than silently degrade) if either is violated:
 
-- **`INTERNAL_API_KEY` must be ≥32 characters.** The `/internal/relay/*` routes are the
-  relay → control-plane authorizer and are gated **only** by this shared secret, so it
-  must be **≥32 random bytes** in production (e.g. `openssl rand -base64 32`). It is also
-  the same secret both sides hold, so rotate it in lockstep. Just as important: these
-  internal routes **must not be internet-reachable** — keep them on the private network
-  between the relay and the control plane (platform private networking / a firewall);
-  never expose them at the public edge.
+- **`INTERNAL_API_KEY` is required and must be ≥32 characters.** The `/internal/relay/*`
+  routes are the relay → control-plane authorizer and are gated **only** by this shared
+  secret, so an **unset** key (which would silently `503` every relay call and break
+  authorization) and a **short**, guessable one both fail the boot. Use **≥32 random
+  bytes** (e.g. `openssl rand -base64 32`) and rotate it in lockstep across the control
+  plane and every cell. This surface should also be kept off the public edge — see
+  [Isolating the internal API](#isolating-the-internal-api).
 - **The dev identity provider must not boot.** If `DEV_HUMAN_TOKEN` is set in production
   the boot fails unless you *explicitly* opt in with `ALLOW_DEV_IDENTITY=1`. The dev
   provider verifies a single shared secret and mints no real sign-in tokens — it exists
   for local runs without Clerk (see [`running-locally.md`](./running-locally.md)). In
   production, leave `DEV_HUMAN_TOKEN` unset and use Clerk.
+
+The **relay** image also sets `NODE_ENV=production`, which activates its own boot guard:
+**`CONTROL_PLANE_URL` must be `https`** (a loopback host may use `http`). Since the relay
+presents `INTERNAL_API_KEY` on every call, a misconfigured cleartext URL to a public host
+would leak the shared secret on the wire — so the relay refuses to boot rather than do so.
+
+### Isolating the internal API
+
+The `/internal/relay/*` surface is the relay's authorizer, guarded **only** by
+`INTERNAL_API_KEY` and with **no** rate limit — so if it rides the public edge, a leaked or
+brute-forced key allows host-key enumeration given known host ids. Keep it off the edge.
+The control plane gives you a concrete mechanism rather than relying on prose:
+
+- **Move it to a private listener (recommended).** Set **`INTERNAL_LISTEN_PORT`** (e.g.
+  `3001`) and the control plane serves the internal routes from a **separate** Fastify
+  instance bound to **`INTERNAL_LISTEN_HOST`** (default `127.0.0.1`), and **omits them from
+  the public app entirely**. The public edge then exposes only `/v1/*` + `/healthz`; the
+  relay reaches the internal API over the private interface via its `CONTROL_PLANE_URL`.
+  - **Co-located** relay + control plane (same machine/pod): keep the default loopback host
+    and point the relay at `CONTROL_PLANE_URL=http://127.0.0.1:3001` — loopback `http` is
+    allowed even in production because it never leaves the box.
+  - **Separate hosts**: bind `INTERNAL_LISTEN_HOST` to the private-network interface (VPC /
+    WireGuard / platform 6PN) and dial it from the relay over that private address, with TLS
+    in front so `CONTROL_PLANE_URL` can stay `https`.
+- **Or keep the single listener** (leave `INTERNAL_LISTEN_PORT` unset — the default, so
+  existing deploys are unchanged) and fence `/internal/*` at the edge with your proxy or
+  firewall. Prefer the private listener where you can.
+
+The private listener is **defence in depth**, not a replacement for the secret: the
+`INTERNAL_API_KEY` guard still applies on the internal instance.
 
 ### Per-IP rate limits behind a proxy
 
@@ -228,6 +264,16 @@ fly deploy --config fly.control-plane.toml --dockerfile apps/control-plane/Docke
 ```
 
 Then point `api.yourdomain` at the app (`fly certs add api.yourdomain`).
+
+> **Optional — private internal listener.** To keep `/internal/relay/*` off the public
+> edge, set `INTERNAL_LISTEN_PORT` (e.g. `3001`); those routes then move to a separate
+> listener and are omitted from the public app (§ [Isolating the internal API](#isolating-the-internal-api)).
+> On Fly this suits a **co-located** relay + control plane — keep the loopback default and
+> set `CONTROL_PLANE_URL=http://127.0.0.1:3001` on the relay. With the relay as a *separate*
+> Fly app, bind `INTERNAL_LISTEN_HOST` to the private 6PN interface and front it with TLS so
+> the relay's `CONTROL_PLANE_URL` stays `https` (in production the relay refuses cleartext
+> `http` to a non-loopback host). Otherwise leave `INTERNAL_LISTEN_PORT` unset and rely on
+> the `INTERNAL_API_KEY` guard on the public app (the default topology shown above).
 
 ### 2. Relay — `fly.relay.toml`
 
