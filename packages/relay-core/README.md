@@ -42,8 +42,9 @@ A **director** (a well-known endpoint, itself **P2b**) assigns each host a
 2. **Data connection (controller).** A controller with a one-time **ticket**
    opens a *data* connection and presents it.
 3. **Signal.** Over the host's control connection the cell sends
-   `conn-open { ticket }`. The host opens a **fresh data connection** for that
-   ticket.
+   `conn-open { ticket, nonce }`. The host opens a **fresh data connection** for
+   that ticket and authenticates it as the registered host with a MAC over the
+   nonce (the *data-leg key*, below), so an on-path racer cannot splice first.
 4. **Bridge.** The cell splices the two data connections and pipes them as raw
    bytes. The `@pherry/channel` handshake and records flow through untouched.
 
@@ -76,8 +77,8 @@ Every message is a JSON object discriminated on `t`, validated by zod
 | `host-challenge` `{ cellId, nonceB64, cellEphemeralPubB64 }` | cell → host | reply to `host-hello`; a fresh challenge |
 | `host-proof` `{ macB64 }` | host → cell | the proof answering the challenge |
 | `host-registered` `{ hostId }` | cell → host | registration acknowledged |
-| `conn-open` `{ ticket }` | cell → host | a controller is waiting; dial a data connection |
-| `data-auth` `{ role, ticket }` | dialer → cell | first frame on a data connection (`role`: `host` \| `controller`) |
+| `conn-open` `{ ticket, nonceB64 }` | cell → host | a controller is waiting; dial a data connection (`nonceB64`: a fresh data-leg challenge) |
+| `data-auth` `{ role, ticket, macB64? }` | dialer → cell | first frame on a data connection (`role`: `host` \| `controller`; `macB64` present **only** for `host`) |
 | `data-ready` `{}` | cell → both | bridge complete; **every byte after is opaque** |
 | `drain` `{}` | cell → host | stop taking new work; existing bridges live on |
 | `close` `{ code, reason? }` | either | refuse / tear down, with a coded reason |
@@ -132,6 +133,47 @@ The `0x00` separators keep the variable-length `hostId` / `cellId` unambiguous.
 A re-registration for an already-registered `hostId` (with a valid proof)
 **replaces** the previous control connection; the old one is closed.
 
+## Authenticating the host data dial
+
+The proof authenticates the host's *control* connection. Per bridge the host then
+dials a **separate** data connection (`data-auth { role: 'host', ticket }`). Because
+the relay is cleartext, an on-path adversary who observes the cell's `conn-open`
+could race the real host and splice its own data connection to the waiting
+controller — **burning the bridge**. That is an availability attack only (the inner
+channel still fails closed on the pinned static, so content never leaks), but it is
+a genuinely *unauthenticated* splice.
+
+The data leg is bound to the **same registration DH** — no extra round-trip, no new
+key material. Both sides derive a data-leg key from the proof's `dh`:
+
+```
+k_data = HKDF-SHA256(ikm = dh, salt = nonce_reg,
+                     info = "pherry/relay-core/v1/host-data-auth", len = 32)
+```
+
+Per `conn-open` the cell mints a **fresh** 32-byte `bridgeNonce` and sends it with
+the ticket. The host answers its `data-auth` with
+
+```
+mac = HMAC-SHA256(k_data,
+       "pherry/relay-core/v1/host-data-auth"
+       || utf8(cellId) || 0x00 || utf8(ticket) || 0x00 || bridgeNonce)
+```
+
+The cell recomputes `mac` (from the `k_data` it retained for that host at
+registration) and compares it **constant-time** before it splices. A missing,
+malformed, or mismatched MAC — or a host no longer registered — is refused with
+`close { code: 'data-auth-failed' }`, and the pending bridge is **left intact** so
+the genuine host's correct dial can still complete it. An adversary that only saw
+`conn-open` never held the DH, so it cannot produce `mac`. The controller
+`data-auth` carries **no** MAC and is byte-for-byte unchanged.
+
+> The `mac` does cross the cleartext wire, so a racer who *also* captures the host's
+> in-flight data-auth could replay it — but only within the narrow window before the
+> host's own dial is spliced, against that one single-use `(ticket, bridgeNonce)`,
+> and still only to deny service. The pre-dial burn — forgeable from `conn-open`
+> alone — is what this shuts.
+
 ## Tickets
 
 A **ticket** (`tkt_<32 hex>`) is a one-time, TTL-bounded capability to reach one
@@ -157,9 +199,10 @@ host, and start the bridge-timeout clock.
 ## Bridge lifecycle and close codes
 
 ```
-controller: data-auth ─▶ cell validates ─▶ conn-open ─▶ host: data-auth(role=host)
-                                                │                     │
-                                                └── both present ─────┘
+controller: data-auth ─▶ cell validates ─▶ conn-open(+nonce) ─▶ host: data-auth(role=host,+mac)
+                                                │                            │
+                                                └──── both present, ─────────┘
+                                                      host MAC verified
                                                         │
                                           data-ready to BOTH, then splice
                                                         │
@@ -168,6 +211,9 @@ controller: data-auth ─▶ cell validates ─▶ conn-open ─▶ host: data-a
 
 - The host must dial within `bridgeTimeoutMs` (default 10 s, injectable). If it
   never does, the waiting controller gets `close { code: 'bridge-timeout' }`.
+- The host `data-auth { role: 'host' }` must carry a valid **data-leg MAC** (see
+  *Authenticating the host data dial*). A missing / mismatched MAC → `close { code:
+  'data-auth-failed' }`, and the pending bridge stays open for the genuine host.
 - After `data-ready` the cell **never parses another byte** — it forwards each
   inbound byte to the peer connection verbatim, and a close of either side closes
   the other.
@@ -177,9 +223,9 @@ controller: data-auth ─▶ cell validates ─▶ conn-open ─▶ host: data-a
   `close { code: 'drained' }`; a `drain` message is sent to every registered host.
 
 The full close-code set: `unknown-host` · `proof-failed` · `bad-ticket` ·
-`ticket-expired` · `ticket-reused` · `bridge-timeout` · `drained` ·
-`protocol-error`. The adapters surface a refusal as a rejected promise whose error
-is a `RelayError` carrying the `code`.
+`ticket-expired` · `ticket-reused` · `bridge-timeout` · `data-auth-failed` ·
+`drained` · `protocol-error`. The adapters surface a refusal as a rejected promise
+whose error is a `RelayError` carrying the `code`.
 
 ## Context binding — the no-cross-wiring guarantee
 
@@ -231,6 +277,12 @@ forwards bytes; it must never read them.
 - **Learn the host's identity key** — the host's static public key is pinned
   out-of-band and never crosses the wire; the cell sees only per-session ephemeral
   public keys and the opaque `hostId` label.
+
+> Beyond the cell, the **network** is untrusted — the outer protocol is cleartext.
+> An on-path adversary that observes `conn-open` cannot **burn a bridge** by racing
+> the host's data dial: that dial is authenticated with a MAC under the registration
+> DH (see *Authenticating the host data dial*), which the racer never held. Session
+> content is sealed end-to-end regardless.
 
 ## Develop
 

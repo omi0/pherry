@@ -36,6 +36,42 @@
  *
  * The `0x00` separators make the variable-length `hostId` / `cellId` unambiguous
  * in the transcript preimage.
+ *
+ * ## The data-leg key — authenticating the host's data dials
+ *
+ * The proof authenticates the host's *control* connection. Per bridge the host
+ * then dials a *separate* data connection presenting the same `ticket`. On the
+ * cleartext relay an on-path adversary who observes the cell's `conn-open` could
+ * race the real host and splice its own data connection to the waiting controller,
+ * **burning the bridge** — an availability attack (the inner channel still fails
+ * closed on the pinned static, so content never leaks). We close that race by
+ * binding the data leg to the **same registration DH**, at no extra round-trip and
+ * no new key material:
+ *
+ * ```
+ * k_data = HKDF-SHA256(ikm = dh, salt = nonce_reg,
+ *                      info = "pherry/relay-core/v1/host-data-auth", len = 32)
+ * ```
+ *
+ * Both sides derive `k_data` from that `dh` (the cell from `cell_ephemeral_priv +
+ * host_static_pub`, the host from `host_static_priv + cell_ephemeral_pub`) and
+ * retain it for the registration's lifetime. Per `conn-open` the cell mints a fresh
+ * 32-byte `bridgeNonce`; the host answers its data-auth with
+ *
+ * ```
+ * mac = HMAC-SHA256(k_data,
+ *        "pherry/relay-core/v1/host-data-auth"
+ *        || utf8(cellId) || 0x00 || utf8(ticket) || 0x00 || bridgeNonce)
+ * ```
+ *
+ * which the cell recomputes and compares constant-time before it splices. An
+ * adversary that has only seen `conn-open` never held the DH, so it cannot produce
+ * `mac` and can no longer win the splice ahead of the host. The `mac` itself does
+ * cross the cleartext wire, so a racer who *also* captures the host's in-flight
+ * data-auth could replay it — but only inside the narrow window before the host's
+ * own dial is spliced, against that one single-use `(ticket, bridgeNonce)`, and
+ * still only to deny service (content stays sealed by the channel context). The
+ * pre-dial burn — forgeable from `conn-open` alone — is what this shuts.
  */
 import { x25519 } from '@noble/curves/ed25519.js'
 import { hkdf } from '@noble/hashes/hkdf.js'
@@ -149,4 +185,103 @@ function computeMac(dh: Uint8Array, hostId: string, challenge: HostChallenge): U
     challenge.cellEphemeralPub,
   )
   return hmac(sha256, key, transcript)
+}
+
+/**
+ * HKDF `info` and MAC domain-separation label binding the data-leg auth to this
+ * relay version. Distinct from {@link PROOF_INFO}, so the data-leg key and the
+ * proof key are independent derivations from the same DH.
+ */
+const DATA_AUTH_LABEL = encoder.encode('pherry/relay-core/v1/host-data-auth')
+
+/**
+ * Derive the data-leg key from the proof's shared secret and the registration
+ * nonce. Internal: both public derivers funnel their `dh` here, so the HKDF that
+ * defines `k_data` lives in exactly one place. The caller owns wiping `dh`.
+ */
+function deriveDataAuthKey(dh: Uint8Array, nonce: Uint8Array): Uint8Array {
+  return hkdf(sha256, dh, nonce, DATA_AUTH_LABEL, RELAY_FIELD_BYTES)
+}
+
+/**
+ * Host side: derive the data-leg key `k_data` from `challenge` and the host's
+ * static keypair — the SAME DH the proof uses (`X25519(host_static_priv,
+ * cell_ephemeral_pub)`). The host retains `k_data` for its registration's lifetime
+ * and answers each `conn-open` with {@link dataAuthMac}. The intermediate DH is
+ * best-effort wiped, mirroring the challenge ephemeral's hygiene.
+ */
+export function hostDataAuthKey(challenge: HostChallenge, hostStaticKey: KeyPair): Uint8Array {
+  const dh = x25519.getSharedSecret(hostStaticKey.secretKey, challenge.cellEphemeralPub)
+  try {
+    return deriveDataAuthKey(dh, challenge.nonce)
+  } finally {
+    dh.fill(0)
+  }
+}
+
+/**
+ * Cell side: derive the same `k_data` from the secret `challenge` and the host's
+ * registered static **public** key (`X25519(cell_ephemeral_priv, host_static_pub)`).
+ * Returns `null` if the DH is unusable — the same defensive path as
+ * {@link verifyProof}; in the registration flow the proof has already reproduced
+ * this DH, so a usable key is guaranteed. The intermediate DH is best-effort wiped.
+ */
+export function cellDataAuthKey(
+  challenge: HostChallengeSecret,
+  hostStaticPub: Uint8Array,
+): Uint8Array | null {
+  let dh: Uint8Array
+  try {
+    dh = x25519.getSharedSecret(challenge.cellEphemeralSecret, hostStaticPub)
+  } catch {
+    return null
+  }
+  try {
+    return deriveDataAuthKey(dh, challenge.nonce)
+  } finally {
+    dh.fill(0)
+  }
+}
+
+/**
+ * Compute the data-leg MAC binding a host data connection to its registration
+ * (`k_data`), the cell, the ticket, and the per-`conn-open` `bridgeNonce`:
+ *
+ * ```
+ * mac = HMAC-SHA256(k_data, LABEL || utf8(cellId) || 0x00 || utf8(ticket) || 0x00 || bridgeNonce)
+ * ```
+ *
+ * The host sends this in `data-auth { role: 'host' }`; the cell recomputes it. The
+ * `0x00` separators keep the variable-length `cellId` / `ticket` unambiguous.
+ */
+export function dataAuthMac(
+  kData: Uint8Array,
+  cellId: string,
+  ticket: string,
+  bridgeNonce: Uint8Array,
+): Uint8Array {
+  const preimage = concatBytes(
+    DATA_AUTH_LABEL,
+    encoder.encode(cellId),
+    SEPARATOR,
+    encoder.encode(ticket),
+    SEPARATOR,
+    bridgeNonce,
+  )
+  return hmac(sha256, kData, preimage)
+}
+
+/**
+ * Cell side: constant-time verify a host `data-auth` MAC against the expected
+ * {@link dataAuthMac}. A wrong-length or mismatched MAC yields `false` (the compare
+ * leaks nothing by timing), so the cell refuses the splice with `data-auth-failed`.
+ */
+export function verifyDataAuthMac(
+  kData: Uint8Array,
+  cellId: string,
+  ticket: string,
+  bridgeNonce: Uint8Array,
+  mac: Uint8Array,
+): boolean {
+  return constantTimeEqual(dataAuthMac(kData, cellId, ticket, bridgeNonce), mac)
 }

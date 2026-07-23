@@ -55,8 +55,17 @@ export {
   encodeOuterMessage,
 } from './outer-frame.js'
 
-// Host proof
-export { makeChallenge, proveHost, verifyProof, wipeChallenge } from './host-proof.js'
+// Host proof + the data-leg authentication derived from it
+export {
+  cellDataAuthKey,
+  dataAuthMac,
+  hostDataAuthKey,
+  makeChallenge,
+  proveHost,
+  verifyDataAuthMac,
+  verifyProof,
+  wipeChallenge,
+} from './host-proof.js'
 export type { HostChallenge, HostChallengeSecret } from './host-proof.js'
 
 // Channel context binding

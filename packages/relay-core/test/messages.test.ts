@@ -33,8 +33,9 @@ describe('outer message codec', () => {
     { t: 'host-challenge', cellId: 'cell_1', nonceB64: b32(1), cellEphemeralPubB64: b32(2) },
     { t: 'host-proof', macB64: b32(3) },
     { t: 'host-registered', hostId: 'host_1' },
-    { t: 'conn-open', ticket: newTicket() },
-    { t: 'data-auth', role: 'host', ticket: newTicket() },
+    { t: 'conn-open', ticket: newTicket(), nonceB64: b32(4) },
+    { t: 'data-auth', role: 'host', ticket: newTicket(), macB64: b32(5) },
+    { t: 'data-auth', role: 'host', ticket: newTicket() }, // MAC is optional at the schema level
     { t: 'data-auth', role: 'controller', ticket: newTicket() },
     { t: 'data-ready' },
     { t: 'drain' },
@@ -61,7 +62,9 @@ describe('outer message codec', () => {
     },
     { t: 'host-proof', macB64: toBase64(new Uint8Array(16)) }, // wrong length
     { t: 'conn-open', ticket: 'not-a-ticket' },
+    { t: 'conn-open', ticket: newTicket() }, // missing the required bridge nonce
     { t: 'data-auth', role: 'relay', ticket: newTicket() }, // bad role
+    { t: 'data-auth', role: 'host', ticket: newTicket(), macB64: toBase64(new Uint8Array(16)) }, // wrong MAC length
     { t: 'close', code: 'nope' }, // unknown close code
     { t: 'unknown-type' },
     {},

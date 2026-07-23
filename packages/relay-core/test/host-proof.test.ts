@@ -2,14 +2,22 @@ import { generateKeyPair } from '@pherry/channel'
 import { describe, expect, it } from 'vitest'
 import {
   type HostChallengeSecret,
+  cellDataAuthKey,
+  dataAuthMac,
+  hostDataAuthKey,
   makeChallenge,
+  newTicket,
   proveHost,
+  verifyDataAuthMac,
   verifyProof,
   wipeChallenge,
 } from '../src/index.js'
 
 const HOST_ID = 'host_alpha'
 const CELL_ID = 'cell_one'
+
+/** A deterministic 32-byte bridge nonce for the data-leg tests. */
+const nonce = (fill: number): Uint8Array => new Uint8Array(32).fill(fill)
 
 describe('host proof', () => {
   it('a proof from the real static key verifies', () => {
@@ -90,5 +98,70 @@ describe('host proof', () => {
     const flipped = mac.slice()
     flipped[flipped.length - 1] ^= 0x01
     expect(verifyProof(challenge, HOST_ID, host.publicKey, flipped)).toBe(false)
+  })
+})
+
+describe('data-leg authentication (k_data / data-auth MAC)', () => {
+  it('the host and the cell derive the same k_data from the same challenge DH', () => {
+    const host = generateKeyPair()
+    const challenge = makeChallenge(CELL_ID)
+    const cellKey = cellDataAuthKey(challenge, host.publicKey)
+    expect(cellKey).not.toBeNull()
+    // Host: X25519(host_static_priv, cell_ephemeral_pub); cell: X25519(cell_ephemeral_priv, host_static_pub).
+    expect(hostDataAuthKey(challenge, host)).toEqual(cellKey)
+  })
+
+  it("derives a distinct k_data from the proof key (different HKDF 'info')", () => {
+    const host = generateKeyPair()
+    const challenge = makeChallenge(CELL_ID)
+    // The proof MAC and the data-leg MAC over the same fields must not collide: they
+    // key off independently-derived secrets, so knowing one never yields the other.
+    const proofMac = proveHost(challenge, HOST_ID, host)
+    const dataMac = dataAuthMac(hostDataAuthKey(challenge, host), CELL_ID, newTicket(), nonce(1))
+    expect(dataMac).not.toEqual(proofMac)
+  })
+
+  it("a host's data-auth MAC verifies on the cell for the same (cellId, ticket, nonce)", () => {
+    const host = generateKeyPair()
+    const challenge = makeChallenge(CELL_ID)
+    const cellKey = cellDataAuthKey(challenge, host.publicKey)
+    if (cellKey === null) throw new Error('cell could not derive k_data')
+    const ticket = newTicket()
+    const bridgeNonce = nonce(0x11)
+    const mac = dataAuthMac(hostDataAuthKey(challenge, host), CELL_ID, ticket, bridgeNonce)
+    expect(verifyDataAuthMac(cellKey, CELL_ID, ticket, bridgeNonce, mac)).toBe(true)
+  })
+
+  describe('a data-auth MAC does not verify when any bound field differs', () => {
+    const host = generateKeyPair()
+    const challenge = makeChallenge(CELL_ID)
+    const kData = hostDataAuthKey(challenge, host) // == the cell's key (proven above)
+    const ticket = newTicket()
+    const bridgeNonce = nonce(0x22)
+    const mac = dataAuthMac(kData, CELL_ID, ticket, bridgeNonce)
+
+    it('a different bridge nonce fails (no fixed-nonce replay)', () => {
+      expect(verifyDataAuthMac(kData, CELL_ID, ticket, nonce(0x23), mac)).toBe(false)
+    })
+    it('a different ticket fails', () => {
+      expect(verifyDataAuthMac(kData, CELL_ID, newTicket(), bridgeNonce, mac)).toBe(false)
+    })
+    it('a different cellId fails', () => {
+      expect(verifyDataAuthMac(kData, 'cell_evil', ticket, bridgeNonce, mac)).toBe(false)
+    })
+    it("a different host's k_data fails", () => {
+      const other = hostDataAuthKey(makeChallenge(CELL_ID), generateKeyPair())
+      expect(verifyDataAuthMac(other, CELL_ID, ticket, bridgeNonce, mac)).toBe(false)
+    })
+    it('a truncated MAC fails (constant-time compare returns false)', () => {
+      expect(verifyDataAuthMac(kData, CELL_ID, ticket, bridgeNonce, mac.slice(0, 31))).toBe(false)
+    })
+  })
+
+  it('a fresh challenge yields a fresh k_data (nonce + ephemeral both vary)', () => {
+    const host = generateKeyPair()
+    const a = hostDataAuthKey(makeChallenge(CELL_ID), host)
+    const b = hostDataAuthKey(makeChallenge(CELL_ID), host)
+    expect(a).not.toEqual(b)
   })
 })

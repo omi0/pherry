@@ -23,11 +23,19 @@ import type { Duplex } from '@pherry/channel'
 import type { RelayAuthorizer } from './authorizer.js'
 import {
   type HostChallengeSecret,
+  cellDataAuthKey,
   makeChallenge,
+  verifyDataAuthMac,
   verifyProof,
   wipeChallenge,
 } from './host-proof.js'
-import { type OuterMessage, RelayCloseCode, fromBase64, toBase64 } from './messages.js'
+import {
+  type OuterMessage,
+  RELAY_FIELD_BYTES,
+  RelayCloseCode,
+  fromBase64,
+  toBase64,
+} from './messages.js'
 import { OuterConnection } from './outer-frame.js'
 
 /** Default bridge timeout: how long a controller waits for its host to dial. */
@@ -131,6 +139,12 @@ interface Conn {
   // Explicit `| undefined` so it can be cleared by assignment after the proof wipe
   // (under `exactOptionalPropertyTypes`) without the `delete` operator.
   challenge?: HostChallengeSecret | undefined
+  /**
+   * Retained on a *registered host's control* Conn: the data-leg key derived from
+   * the registration DH (see host-proof). The cell uses it to authenticate this
+   * host's per-`conn-open` data dials; it lives for the control Conn's lifetime.
+   */
+  dataKey?: Uint8Array | undefined
   ticket?: string
   bridge?: Bridge | undefined
 }
@@ -141,6 +155,8 @@ interface PendingBridge {
   readonly hostId: string
   readonly controller: Conn
   readonly timer: TimerHandle
+  /** The fresh 32-byte nonce sent in this bridge's `conn-open`; the host binds it into its data-auth MAC. */
+  readonly nonce: Uint8Array
 }
 
 /** A live, spliced bridge. */
@@ -276,7 +292,11 @@ class CellImpl implements Cell {
         void this.#beginControllerBridge(conn, message.ticket).catch(() => this.#fail(conn))
       } else {
         conn.role = 'host-data'
-        this.#completeHostDial(conn, message.ticket)
+        this.#completeHostDial(
+          conn,
+          message.ticket,
+          message.macB64 === undefined ? undefined : fromBase64(message.macB64),
+        )
       }
       return
     }
@@ -316,17 +336,26 @@ class CellImpl implements Cell {
       return
     }
     const verified = verifyProof(challenge, hostId, hostStaticPub, fromBase64(message.macB64))
+    // Derive the data-leg key from the SAME challenge DH while the ephemeral secret
+    // is still live — retained on the control Conn to authenticate this host's later
+    // per-conn-open data dials (see host-proof). Only meaningful once the proof holds.
+    const dataKey = verified ? cellDataAuthKey(challenge, hostStaticPub) : null
     // The challenge ephemeral secret has served its only purpose now the proof is
-    // checked; wipe it (best-effort) and drop the reference so it does not linger
-    // on the long-lived control Conn until GC — mirroring the channel's ephemeral
-    // hygiene. Also covers the failure path, whose Conn is about to be dropped.
+    // checked and the data-leg key derived; wipe it (best-effort) and drop the
+    // reference so it does not linger on the long-lived control Conn until GC —
+    // mirroring the channel's ephemeral hygiene. Also covers the failure path, whose
+    // Conn is about to be dropped.
     this.#dropChallenge(conn)
-    if (!verified) {
+    if (!verified || !dataKey) {
+      // `!dataKey` is unreachable once `verified` (the proof already reproduced this
+      // exact DH); refuse defensively rather than register a host we cannot later
+      // authenticate on its data leg.
       this.#refuse(conn, RelayCloseCode.ProofFailed)
       return
     }
     const previous = this.#hosts.get(hostId)
     if (previous && previous !== conn) previous.outer.close()
+    conn.dataKey = dataKey
     this.#hosts.set(hostId, conn)
     conn.role = 'control'
     conn.outer.send({ t: 'host-registered', hostId })
@@ -368,12 +397,16 @@ class CellImpl implements Cell {
     this.#markTicketUsed(ticket)
     conn.ticket = ticket
     conn.hostId = record.hostId
+    // Mint a fresh per-conn-open nonce: the host must bind it into its data-auth MAC,
+    // so an on-path racer that only observed `conn-open` cannot forge the host dial,
+    // and a MAC minted for one conn-open cannot be replayed against another.
+    const nonce = crypto.getRandomValues(new Uint8Array(RELAY_FIELD_BYTES))
     const timer = this.#timers.setTimeout(
       () => this.#onBridgeTimeout(ticket),
       this.#bridgeTimeoutMs,
     )
-    this.#pending.set(ticket, { ticket, hostId: record.hostId, controller: conn, timer })
-    control.outer.send({ t: 'conn-open', ticket })
+    this.#pending.set(ticket, { ticket, hostId: record.hostId, controller: conn, timer, nonce })
+    control.outer.send({ t: 'conn-open', ticket, nonceB64: toBase64(nonce) })
   }
 
   /**
@@ -398,11 +431,33 @@ class CellImpl implements Cell {
     this.#refuse(pending.controller, RelayCloseCode.BridgeTimeout)
   }
 
-  /** Match a host's data connection to its pending bridge and splice. */
-  #completeHostDial(conn: Conn, ticket: string): void {
+  /**
+   * Match a host's data connection to its pending bridge, **authenticate the dialer
+   * as the registered host**, and splice. The pending bridge names the `hostId`;
+   * that host's control Conn holds `k_data` from registration. The dialer must carry
+   * a MAC over `(cellId, ticket, bridgeNonce)` under `k_data`, which the cell
+   * recomputes and compares constant-time.
+   *
+   * A missing MAC, a host that is no longer registered, or a mismatch refuses **only
+   * this data connection** with `data-auth-failed` and — crucially — leaves the
+   * pending bridge and its timer intact, so the genuine host's correct dial can still
+   * complete it. Without this check an on-path adversary that merely observed
+   * `conn-open` could win the splice and burn the bridge (a ticket-burn DoS).
+   */
+  #completeHostDial(conn: Conn, ticket: string, mac: Uint8Array | undefined): void {
     const pending = this.#pending.get(ticket)
     if (!pending) {
       this.#refuse(conn, RelayCloseCode.BadTicket)
+      return
+    }
+    const control = this.#hosts.get(pending.hostId)
+    if (
+      !control?.dataKey ||
+      mac === undefined ||
+      !verifyDataAuthMac(control.dataKey, this.#cellId, ticket, pending.nonce, mac)
+    ) {
+      // Do NOT clear the pending bridge or its timer: the genuine host can still dial.
+      this.#refuse(conn, RelayCloseCode.DataAuthFailed)
       return
     }
     this.#timers.clearTimeout(pending.timer)

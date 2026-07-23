@@ -19,11 +19,11 @@
  *   cell -> host   host-challenge    fresh nonce + cell ephemeral pubkey
  *   host -> cell   host-proof        HMAC proving possession of the static key
  *   cell -> host   host-registered   registration ack
- *   cell -> host   conn-open         a controller is waiting for this ticket
+ *   cell -> host   conn-open         a controller waits: ticket + a fresh bridge nonce
  *   cell -> host   drain             stop taking new work (existing bridges live)
  *
  * data connection (host or controller <-> cell), framed until data-ready:
- *   dialer -> cell data-auth         first message; role + ticket
+ *   dialer -> cell data-auth         first message; role + ticket (+ MAC for a host)
  *   cell -> dialer data-ready        bridge complete; everything after is raw
  *
  * either direction, framed phase:
@@ -75,6 +75,7 @@ export const RELAY_CLOSE_CODES = [
   'ticket-expired',
   'ticket-reused',
   'bridge-timeout',
+  'data-auth-failed',
   'drained',
   'protocol-error',
 ] as const
@@ -96,6 +97,12 @@ export const RelayCloseCode = {
   TicketReused: 'ticket-reused',
   /** The host never dialed the matching data connection within the bridge timeout. */
   BridgeTimeout: 'bridge-timeout',
+  /**
+   * A host data connection failed to authenticate to its pending bridge: a missing,
+   * malformed, or mismatched data-leg MAC (or its host is no longer registered). The
+   * splice is refused; the pending bridge stays open for the genuine host to dial.
+   */
+  DataAuthFailed: 'data-auth-failed',
   /** The cell is draining and refuses new controller connections. */
   Drained: 'drained',
   /** A malformed, oversized, or out-of-sequence outer message. */
@@ -149,18 +156,33 @@ export const HostRegisteredMessage = z.object({
 })
 export type HostRegisteredMessage = z.infer<typeof HostRegisteredMessage>
 
-/** cell -> host (over control): a controller is waiting; dial a data connection for this ticket. */
+/**
+ * cell -> host (over control): a controller is waiting; dial a data connection for
+ * this ticket. `nonceB64` is a fresh 32-byte per-`conn-open` challenge the host must
+ * bind into its data-auth MAC (see the host proof's data-leg key), so an on-path
+ * racer that only observed this message cannot forge the host dial.
+ */
 export const ConnOpenMessage = z.object({
   t: z.literal(MessageType.ConnOpen),
   ticket: Ticket,
+  nonceB64: base64Bytes(RELAY_FIELD_BYTES),
 })
 export type ConnOpenMessage = z.infer<typeof ConnOpenMessage>
 
-/** dialer -> cell: the first message on a data connection; the role and the ticket. */
+/**
+ * dialer -> cell: the first message on a data connection; the role and the ticket.
+ * `macB64` authenticates a `role: 'host'` dial as the registered host — a 32-byte
+ * `HMAC(k_data, cellId || ticket || bridgeNonce)` over the `conn-open` nonce (see
+ * {@link import('./host-proof.js').dataAuthMac}). It is **present only for the host
+ * role**; a `role: 'controller'` data-auth carries no MAC and stays byte-identical
+ * to before this field existed (the field is optional and absent — nothing to
+ * encode — so the controller wire is unchanged, which the iOS vectors pin).
+ */
 export const DataAuthMessage = z.object({
   t: z.literal(MessageType.DataAuth),
   role: z.enum(['host', 'controller']),
   ticket: Ticket,
+  macB64: base64Bytes(RELAY_FIELD_BYTES).optional(),
 })
 export type DataAuthMessage = z.infer<typeof DataAuthMessage>
 
