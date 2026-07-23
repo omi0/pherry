@@ -532,6 +532,12 @@ class CellImpl implements Cell {
       peer.outer.close()
     }
     conn.bridge = undefined
+    // Best-effort wipe of the retained data-leg key (k_data) so it does not linger on the
+    // dropped Conn until GC — mirroring the challenge/channel-key wipe hygiene.
+    if (conn.dataKey) {
+      conn.dataKey.fill(0)
+      conn.dataKey = undefined
+    }
   }
 }
 

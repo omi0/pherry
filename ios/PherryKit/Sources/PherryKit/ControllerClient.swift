@@ -71,12 +71,19 @@ public actor ControllerClient {
     private var closed = false
 
     // Capability handshake (leg-M22): the controller sends `Hello` as its first control
-    // frame, awaits `HelloAck`, and fails closed on an incompatible protocol version.
+    // frame, awaits `HelloAck`, and fails closed on an incompatible protocol version — or,
+    // bounded by `negotiationTimeout`, on a host that withholds its HelloAck without closing.
     // Every request gates on `ensureNegotiated()`.
     private let capabilities: [String]
+    /// Bounded window to await the host's `HelloAck` before failing the negotiation closed —
+    /// the fail-closed property the reference SDK controller and host both enforce (default 10s).
+    private let negotiationTimeout: Duration
     private var negotiated = false
     private var negotiationError: Error?
     private var negotiationWaiters: [CheckedContinuation<Void, Error>] = []
+    /// The single-shot timeout task started after `Hello`. Cancelled in `completeNegotiation`
+    /// (the one settle point), so a normal HelloAck or a channel close stops it firing late.
+    private var negotiationTimeoutTask: Task<Void, Never>?
 
     /// A live subscription — its decoded ``PtyEvent`` stream.
     public struct Subscription: Sendable {
@@ -87,10 +94,13 @@ public actor ControllerClient {
 
     /// Wrap `channel`. Starts the channel, drives the leg-M22 capability handshake (`Hello` →
     /// `HelloAck`), and begins consuming its inbound frames — so it is safe to construct
-    /// before the channel is open.
-    public init(channel: SecureChannel) {
+    /// before the channel is open. `negotiationTimeout` bounds the wait for the host's
+    /// `HelloAck` before failing every request closed (default 10s, matching the reference
+    /// SDK controller and host).
+    public init(channel: SecureChannel, negotiationTimeout: Duration = .seconds(10)) {
         self.channel = channel
         self.capabilities = PherryProtocol.controllerCapabilities
+        self.negotiationTimeout = negotiationTimeout
         Task { await self.run() }
     }
 
@@ -177,6 +187,7 @@ public actor ControllerClient {
         do {
             try await channel.waitUntilOpen()
             try await sendHello()
+            startNegotiationTimeout()
             for try await frame in channel.frames {
                 handleFrame(frame)
             }
@@ -184,6 +195,32 @@ public actor ControllerClient {
         } catch {
             teardown(error)
         }
+    }
+
+    /// After `Hello`, bound the wait for the host's `HelloAck` to `negotiationTimeout`: if it
+    /// elapses before the negotiation settles, `fireNegotiationTimeout` fails it closed. Mirrors
+    /// the reference SDK controller's / host's bounded handshake window. Cancelling the returned
+    /// task in `completeNegotiation` (the single settle point) stops a normal HelloAck or a
+    /// channel close from ever letting it fire late; `Task.sleep` throws on cancel, so `try?`.
+    private func startNegotiationTimeout() {
+        negotiationTimeoutTask = Task { [weak self, negotiationTimeout] in
+            try? await Task.sleep(for: negotiationTimeout)
+            await self?.fireNegotiationTimeout()
+        }
+    }
+
+    /// The window elapsed with no HelloAck: settle the negotiation failed (a timeout) and tear
+    /// the channel down so no RPC can proceed — the fail-closed bounded window. The guard keeps
+    /// the channel close on the timeout path only: under actor reentrancy a HelloAck (or a close)
+    /// may have already settled between `Task.sleep` firing and this hop, in which case
+    /// `completeNegotiation`'s single-settle guard is the authority and this is a no-op.
+    private func fireNegotiationTimeout() {
+        guard !negotiated, negotiationError == nil else { return }
+        completeNegotiation(.failure(RpcClientError(
+            code: "UNAVAILABLE",
+            message: "handshake timeout: host sent no HelloAck"
+        )))
+        Task { [channel] in await channel.close() }
     }
 
     /// Send the opening `Hello` — the first control frame — advertising this build's
@@ -208,6 +245,10 @@ public actor ControllerClient {
     /// Settle the negotiation exactly once, releasing every waiter.
     private func completeNegotiation(_ result: Result<Void, Error>) {
         guard !negotiated, negotiationError == nil else { return }
+        // Single settle point: cancel the bounded-window timeout so a normal HelloAck, a version
+        // rejection, or a channel close stops it firing late.
+        negotiationTimeoutTask?.cancel()
+        negotiationTimeoutTask = nil
         switch result {
         case .success:
             negotiated = true

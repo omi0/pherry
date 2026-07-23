@@ -277,6 +277,7 @@ export class OuterConnection {
     if (this.#rawBufferBytes > MAX_PREHANDLER_RAW_BYTES) {
       const overflowed = this.#rawBufferBytes
       this.#rawBuffer = []
+      this.#rawBufferBytes = 0
       this.#onError(
         new OuterFrameError(
           `buffered ${overflowed} raw bytes before a consumer registered, exceeding ${MAX_PREHANDLER_RAW_BYTES}`,

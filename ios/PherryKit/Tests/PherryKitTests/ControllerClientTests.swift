@@ -92,6 +92,40 @@ final class ControllerClientTests: XCTestCase {
         }
         await client.close()
     }
+
+    /// M22-1: a host that completes the Noise handshake but withholds its `HelloAck` — without
+    /// closing the channel — must not hang every RPC. The bounded negotiation window fires: the
+    /// pending request fails closed with the `UNAVAILABLE` handshake timeout, and the controller
+    /// tears the channel down (mirroring the reference SDK controller / host bounded window).
+    func testNegotiationTimeoutFailsClosed() async throws {
+        let (t1, t2) = MemoryTransport.pair()
+        let host = X25519.generate()
+        let initiator = SecureChannel(role: .initiator(pinnedHostStatic: host.publicKey), transport: t1, context: nil)
+        let responder = SecureChannel(role: .responder(staticSecretKey: host.secret), transport: t2, context: nil)
+        let silent = SilentHost(channel: responder)
+        // A small injected window keeps the test fast and non-flaky.
+        let client = ControllerClient(channel: initiator, negotiationTimeout: .milliseconds(50))
+
+        do {
+            _ = try await client.listSessions()
+            XCTFail("expected the UNAVAILABLE handshake timeout")
+        } catch let error as RpcClientError {
+            XCTAssertEqual(error.code, "UNAVAILABLE")
+            XCTAssertEqual(error.message, "handshake timeout: host sent no HelloAck")
+        }
+
+        // Fail closed: the controller closes the channel, which ends the responder's frame
+        // stream. Bound the wait so a regression fails the test instead of hanging the suite.
+        let closedInTime = await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await silent.waitUntilChannelClosed(); return true }
+            group.addTask { try? await Task.sleep(for: .seconds(2)); return false }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        XCTAssertTrue(closedInTime, "controller should close the channel on negotiation timeout")
+        await client.close()
+    }
 }
 
 /// A minimal scripted host over a responder ``SecureChannel``: it answers `sessions.list`,
@@ -206,5 +240,41 @@ final class ScriptedHost: @unchecked Sendable {
 
     private func sendPty(_ frame: PtyFrame) async {
         try? await channel.send(ChannelFrame(tag: .binary, payload: frame.encoded()))
+    }
+}
+
+/// A responder ``SecureChannel`` that completes the Noise handshake — so the initiator's channel
+/// opens and its `Hello` is delivered — but **never** answers with a `HelloAck`, and never closes
+/// on its own. Models a host that withholds the leg-M22 handshake, the case the controller's
+/// negotiation timeout must break. ``waitUntilChannelClosed()`` lets a test prove the controller
+/// tore the channel down (which ends this responder's frame stream).
+final class SilentHost: @unchecked Sendable {
+    private let channel: SecureChannel
+    private let closed: AsyncStream<Void>
+    private let closedContinuation: AsyncStream<Void>.Continuation
+
+    init(channel: SecureChannel) {
+        self.channel = channel
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        self.closed = stream
+        self.closedContinuation = continuation
+        Task { await self.run() }
+    }
+
+    /// Suspends until the controller closes the channel (which ends this responder's frame stream).
+    func waitUntilChannelClosed() async {
+        for await _ in closed { return }
+    }
+
+    private func run() async {
+        await channel.start()
+        do {
+            for try await _ in channel.frames {
+                // Drain inbound frames (the controller's Hello) without ever replying.
+            }
+        } catch {
+            // The controller closed the channel.
+        }
+        closedContinuation.finish()
     }
 }
