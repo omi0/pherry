@@ -23,6 +23,17 @@
  * the cell splices a bridge and sends `data-ready`, everything after is opaque
  * channel bytes piped verbatim, and this reader is switched off (its leftover
  * buffer handed to the raw phase — see {@link OuterFrameReader.drainRemaining}).
+ *
+ * One buffer here is otherwise unbounded: between {@link OuterConnection.toRaw}
+ * and the moment a raw consumer registers via {@link OuterConnection.onRaw}, raw
+ * bytes are queued so none are lost (a `SecureChannel` registers its inbound
+ * handler only in its constructor, possibly a microtask after `data-ready`
+ * resolves). The cell registers `onRaw` *before* `toRaw`, so its window is empty;
+ * but the adapter path (`awaitDataReady` → `rawDuplexOf`) has a brief real window,
+ * and a hostile relay could blast bytes into it. {@link MAX_PREHANDLER_RAW_BYTES}
+ * caps that pre-handler queue as defence-in-depth: the window legitimately carries
+ * only a peer's 32-byte channel handshake, so the cap sits far above any honest
+ * flow while refusing an unbounded blast — over-cap is fatal for the connection.
  */
 import type { Duplex } from '@pherry/channel'
 import { type OuterMessage, decodeOuterMessage, encodeOuterMessageJson } from './messages.js'
@@ -37,6 +48,16 @@ export const OUTER_LENGTH_PREFIX_BYTES = 4
  * rather than buffering it.
  */
 export const MAX_OUTER_MESSAGE_BYTES = 16 * 1024
+
+/**
+ * Hard cap on bytes queued in {@link OuterConnection}'s raw phase before a
+ * consumer registers via {@link OuterConnection.onRaw} (16 KiB, mirroring
+ * {@link MAX_OUTER_MESSAGE_BYTES}). This pre-handler window is tiny — a microtask
+ * in the adapter path — and legitimately carries only the peer's 32-byte channel
+ * handshake, so the cap is pure headroom for honest traffic while bounding what a
+ * hostile relay can make the connection buffer. Exceeding it closes the connection.
+ */
+export const MAX_PREHANDLER_RAW_BYTES = 16 * 1024
 
 const noop = (): void => {}
 
@@ -180,6 +201,8 @@ export class OuterConnection {
   #raw = false
   #rawHandler: ((bytes: Uint8Array) => void) | null = null
   #rawBuffer: Uint8Array[] = []
+  /** Running byte total of {@link #rawBuffer}, checked against {@link MAX_PREHANDLER_RAW_BYTES}. */
+  #rawBufferBytes = 0
   #closed = false
 
   constructor(duplex: Duplex) {
@@ -231,6 +254,7 @@ export class OuterConnection {
     this.#rawHandler = handler
     const buffered = this.#rawBuffer
     this.#rawBuffer = []
+    this.#rawBufferBytes = 0
     for (const bytes of buffered) handler(bytes)
   }
 
@@ -242,8 +266,26 @@ export class OuterConnection {
   }
 
   #deliverRaw(bytes: Uint8Array): void {
-    if (this.#rawHandler) this.#rawHandler(bytes)
-    else this.#rawBuffer.push(bytes)
+    if (this.#rawHandler) {
+      this.#rawHandler(bytes)
+      return
+    }
+    // No consumer registered yet: queue in arrival order so nothing is lost, but
+    // never without bound. A hostile relay that blasts bytes into the brief
+    // pre-handler window is refused here — report the framing error and close.
+    this.#rawBufferBytes += bytes.length
+    if (this.#rawBufferBytes > MAX_PREHANDLER_RAW_BYTES) {
+      const overflowed = this.#rawBufferBytes
+      this.#rawBuffer = []
+      this.#onError(
+        new OuterFrameError(
+          `buffered ${overflowed} raw bytes before a consumer registered, exceeding ${MAX_PREHANDLER_RAW_BYTES}`,
+        ),
+      )
+      this.close()
+      return
+    }
+    this.#rawBuffer.push(bytes)
   }
 
   #receive(bytes: Uint8Array): void {

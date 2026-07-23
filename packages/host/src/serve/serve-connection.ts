@@ -13,7 +13,12 @@
  *  - `session.subscribe` attaches a {@link SessionSink} that wraps each PTY frame
  *    as a {@link binaryFrame} and sends it; the ack (carrying `streamId` /
  *    `snapshotSeq`) is sent **first**, so the controller learns the stream id
- *    before the snapshot frames arrive.
+ *    before the snapshot frames arrive. The subscription is flow-controlled off the
+ *    channel's writability (`SecureChannel.writable` / `onDrain`): if this
+ *    controller's transport stalls, the session pauses *this* sink and resyncs it on
+ *    drain, so a slow viewer neither grows host memory nor stalls its peers (the
+ *    policy lives in `session.ts`). Over a transport with no backpressure signal the
+ *    channel is always writable, so this is inert and the fan-out is unchanged.
  *  - `session.input` / `session.resize` drive the session and reply `Ack`. A
  *    resize is **attributed** to this connection's viewer, and an unsubscribe /
  *    connection close **releases** it — so when a phone that resized the PTY
@@ -133,6 +138,18 @@ export function serveConnection(
   const touched = new Set<Session>()
   let closed = false
 
+  // Per-subscription resume callbacks for the backpressure policy: `session.ts`
+  // pauses a stalled sink and hands us its resume closure via the subscription's
+  // `SinkFlow.onDrain`; we route the channel's *single* transport-drain signal to
+  // every live subscription. Keyed by ref so a departure removes exactly its
+  // resumer — the channel keeps one drain handler for the whole connection, not
+  // one per subscribe, so a re-subscribe loop cannot accumulate handlers. Over a
+  // transport with no backpressure signal `onDrain` is inert (never fires).
+  const resumers = new Map<SessionRef, () => void>()
+  channel.onDrain(() => {
+    for (const resume of resumers.values()) resume()
+  })
+
   const send = (frame: RpcSuccess | RpcError): void => {
     if (!closed) channel.send(controlFrame(encoder.encode(JSON.stringify(frame))))
   }
@@ -147,6 +164,7 @@ export function serveConnection(
     const sub = subscriptions.get(ref)
     if (!sub) return
     subscriptions.delete(ref)
+    resumers.delete(ref)
     sub.unsubscribe()
     if (departed) sub.session.releaseViewer(viewer)
   }
@@ -154,6 +172,7 @@ export function serveConnection(
   const teardownAll = (): void => {
     for (const sub of subscriptions.values()) sub.unsubscribe()
     subscriptions.clear()
+    resumers.clear()
     // Release over the touched superset: a resize needs no subscription, and
     // releaseViewer is idempotent for viewers already released.
     for (const session of touched) session.releaseViewer(viewer)
@@ -177,9 +196,21 @@ export function serveConnection(
     // Ack first (announcing binary frames), then attach the sink: the snapshot
     // frames the sink emits synchronously thus follow the ack on the wire.
     send(success(id, { streamId: session.streamId, snapshotSeq: session.seq }, { stream: true }))
-    const unsubscribe = session.subscribe((frame) => {
-      if (!closed) channel.send(binaryFrame(frame))
-    })
+    // Flow-controlled by the channel's transport writability: a stalled controller
+    // pauses only its own sink (resynced on drain), never its peers or host memory.
+    // A transport with no backpressure signal reports always-writable, so the
+    // session never pauses and the fan-out is byte-for-byte the prior behaviour.
+    const unsubscribe = session.subscribe(
+      (frame) => {
+        if (!closed) channel.send(binaryFrame(frame))
+      },
+      {
+        writable: () => channel.writable,
+        // Register this subscription's resume closure under its ref; the single
+        // per-connection channel.onDrain (above) fans out to it. teardown removes it.
+        onDrain: (resume) => void resumers.set(params.sessionRef, resume),
+      },
+    )
     subscriptions.set(params.sessionRef, { streamId: session.streamId, unsubscribe, session })
   }
 

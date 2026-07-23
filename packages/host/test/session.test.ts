@@ -1,6 +1,6 @@
 import { type PtyFrame, PtyOpcode, decodePtyFrame, newSessionRef } from '@pherry/protocol'
 import { describe, expect, it } from 'vitest'
-import { FakeBackend, Session, type SessionSpec } from '../src/index.js'
+import { FakeBackend, Session, type SessionSpec, type SinkFlow } from '../src/index.js'
 
 const enc = (s: string) => new TextEncoder().encode(s)
 const dec = (b: Uint8Array) => new TextDecoder().decode(b)
@@ -34,6 +34,32 @@ function collector() {
 
 const monotonic = (frames: PtyFrame[]) =>
   frames.every((f, i) => i === 0 || f.seq >= frames[i - 1].seq)
+
+/**
+ * A hand-driven {@link SinkFlow}: `writable()` returns the current flag, and
+ * `drain()` fires every handler the session registered — the deterministic
+ * stand-in for a socket whose write buffer fills and later flushes. No timers, so
+ * the slow-consumer simulation is exact and never flaky.
+ */
+function controllableFlow() {
+  let writable = true
+  const drains: Array<() => void> = []
+  const flow: SinkFlow = {
+    writable: () => writable,
+    onDrain: (handler) => void drains.push(handler),
+  }
+  return {
+    flow,
+    /** Model the transport buffer filling (`false`) or having capacity (`true`). */
+    setWritable(value: boolean): void {
+      writable = value
+    },
+    /** Model a socket 'drain': notify the session it may resume this sink. */
+    drain(): void {
+      for (const handler of [...drains]) handler()
+    },
+  }
+}
 
 describe('Session subscribe -> snapshot -> live -> ended', () => {
   it('emits Start/Chunk/End, then live Output, then Ended, with monotonic seq', async () => {
@@ -203,3 +229,104 @@ describe('Session snapshot atomicity', () => {
     expect(lastSnapshot).toBeLessThan(firstLive)
   })
 })
+
+// Per-subscriber backpressure (see session.ts "Flow control"): a stalled sink is
+// paused alone and resynced from the snapshot on drain, so it never grows host
+// memory or stalls its peers. A sink with no SinkFlow is always writable —
+// unchanged from before — which every other test in this file exercises.
+describe('Session per-subscriber backpressure', () => {
+  it('pauses a stalled subscriber without stalling a healthy peer, then resyncs on drain', async () => {
+    const { backend, handle, session } = await makeSession()
+    const slow = collector()
+    const slowFlow = controllableFlow()
+    const fast = collector()
+    session.subscribe(slow.sink, slowFlow.flow)
+    session.subscribe(fast.sink) // no flow: always writable, the prior behaviour
+
+    // The slow transport fills. The next delivery is still accepted (Node's write
+    // returns false *after* queuing), then the sink pauses; later frames are dropped.
+    slowFlow.setWritable(false)
+    backend.pushOutput(handle, enc('A')) // delivered to slow, which then pauses
+    backend.pushOutput(handle, enc('B')) // slow paused -> skipped; fast still receives
+    backend.pushOutput(handle, enc('C'))
+    backend.pushOutput(handle, enc('D'))
+
+    // The healthy peer is entirely unaffected: every Output, in order, no gap.
+    expect(fast.only(PtyOpcode.Output).map((f) => dec(f.payload))).toEqual(['A', 'B', 'C', 'D'])
+    expect(fast.ops()).not.toContain(PtyOpcode.Gap)
+    // The stalled subscriber received only the single in-flight frame (A) — B/C/D
+    // were never queued for it, so its memory footprint stayed O(1).
+    expect(slow.only(PtyOpcode.Output).map((f) => dec(f.payload))).toEqual(['A'])
+
+    // The transport drains: the stalled sink is resynced from authoritative state —
+    // a Gap marker immediately followed by a fresh snapshot at the current seq.
+    slowFlow.setWritable(true)
+    slowFlow.drain()
+    const gapIdx = slow.ops().indexOf(PtyOpcode.Gap)
+    expect(gapIdx).toBeGreaterThanOrEqual(0)
+    expect(slow.frames[gapIdx + 1]?.opcode).toBe(PtyOpcode.SnapshotStart)
+    // The resync snapshot carries the screen the sink missed live (B/C/D via 'ABCD').
+    const resyncChunks = slow.frames
+      .slice(gapIdx)
+      .filter((f) => f.opcode === PtyOpcode.SnapshotChunk)
+    expect(dec(concat(resyncChunks.map((f) => f.payload)))).toContain('ABCD')
+  })
+
+  it('does not accumulate frames for a stalled subscriber (bounded memory)', async () => {
+    const { backend, handle, session } = await makeSession()
+    const slow = collector()
+    const slowFlow = controllableFlow()
+    session.subscribe(slow.sink, slowFlow.flow)
+
+    slowFlow.setWritable(false)
+    backend.pushOutput(handle, enc('x')) // delivered, then pauses
+    const afterFirst = slow.frames.length
+    for (let i = 0; i < 1000; i++) backend.pushOutput(handle, enc('y'))
+
+    // 1000 live frames while paused added NOTHING to the stalled sink — there is no
+    // per-subscriber backlog — while the session's seq advanced for all of them.
+    expect(slow.frames.length).toBe(afterFirst)
+    expect(session.seq).toBeGreaterThanOrEqual(1001)
+  })
+
+  it('pauses a subscriber already backed up at subscribe time before any live frame', async () => {
+    const { backend, handle, session } = await makeSession()
+    const slow = collector()
+    const slowFlow = controllableFlow()
+    slowFlow.setWritable(false) // transport already full when it subscribes
+    session.subscribe(slow.sink, slowFlow.flow)
+    const afterSnapshot = slow.frames.length // it still gets the initial snapshot
+
+    backend.pushOutput(handle, enc('live')) // paused from the start -> skipped
+    expect(slow.frames.length).toBe(afterSnapshot)
+
+    slowFlow.setWritable(true)
+    slowFlow.drain()
+    expect(slow.ops()).toContain(PtyOpcode.Gap)
+  })
+
+  it('delivers the terminal Ended frame even to a paused subscriber', async () => {
+    const { backend, handle, session } = await makeSession()
+    const slow = collector()
+    const slowFlow = controllableFlow()
+    session.subscribe(slow.sink, slowFlow.flow)
+
+    slowFlow.setWritable(false)
+    backend.pushOutput(handle, enc('x')) // pauses slow
+    backend.fireExit(handle, 0) // Ended is terminal: forced through despite the pause
+    expect(slow.ops()).toContain(PtyOpcode.Ended)
+  })
+})
+
+/** Concatenate byte chunks into one buffer (local to the backpressure resync check). */
+function concat(chunks: Uint8Array[]): Uint8Array {
+  let total = 0
+  for (const chunk of chunks) total += chunk.length
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    out.set(chunk, offset)
+    offset += chunk.length
+  }
+  return out
+}

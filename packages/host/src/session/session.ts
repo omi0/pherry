@@ -21,6 +21,23 @@
  * also owns the **sizing policy** (viewport authority): the most recent resizer
  * drives the size while attached, and its departure restores the latest
  * remaining viewer's viewport. See the "Sizing policy" section below.
+ *
+ * **Flow control (per-subscriber backpressure).** The fan-out must not let one
+ * slow or stalled viewer exhaust host memory, nor stall the healthy viewers
+ * sharing the session. A subscription may carry an optional {@link SinkFlow} that
+ * reports its transport's writability (a socket whose write buffer has filled —
+ * see `@pherry/transport-node`). When a sink signals it is no longer writable, the
+ * session **pauses live delivery to that sink alone**: it is skipped in the
+ * fan-out while its peers keep receiving, and the skipped frames are recorded as a
+ * gap. When the transport drains, the session resyncs that sink from authoritative
+ * state — a `Gap` frame (frames were dropped) followed by a fresh snapshot at the
+ * current seq — then resumes live delivery. This is the same snapshot mechanism a
+ * late joiner uses, so a viewer that fell behind is caught up, not replayed onto a
+ * stale screen. Nothing is queued per paused sink beyond the single in-flight frame
+ * the transport already holds, so a stalled viewer costs O(1) here and leans on the
+ * bounded {@link ByteRing} + snapshot to recover rather than an unbounded backlog.
+ * A subscription with no {@link SinkFlow} (the default) is always writable and
+ * never pauses — the happy path for a fast reader is byte-for-byte unchanged.
  */
 import { PtyOpcode, encodeExitPayload, encodePtyFrame, encodeSizePayload } from '@pherry/protocol'
 import type { SessionRef } from '@pherry/protocol'
@@ -30,6 +47,34 @@ import { ByteRing } from './ring.js'
 
 /** A subscriber's frame receiver: it is handed each binary PTY frame in order. */
 export type SessionSink = (frame: Uint8Array) => void
+
+/**
+ * Optional per-subscription flow control (see the module's "Flow control"
+ * section). A subscriber whose transport can exert backpressure supplies this so
+ * the session pauses delivery to it — and it alone — when its write buffer fills,
+ * then resyncs it on drain. Omit it (the default) to be treated as always
+ * writable, i.e. today's unconditional fan-out with no added buffering.
+ */
+export interface SinkFlow {
+  /** Whether the sink's transport can accept another frame without unbounded buffering. */
+  writable(): boolean
+  /**
+   * Register the handler the session invokes each time the transport drains
+   * (becomes writable again). The session calls this once per subscription; the
+   * handler fires on every subsequent drain.
+   */
+  onDrain(handler: () => void): void
+}
+
+/** One live subscriber and its per-subscription flow-control state. */
+interface Subscriber {
+  readonly sink: SessionSink
+  readonly flow: SinkFlow | undefined
+  /** Live delivery is suspended because the sink's transport is not writable. */
+  paused: boolean
+  /** A live frame was dropped while paused — a gap the drain-time resync must heal. */
+  missed: boolean
+}
 
 /** Default raw-ring bound: 256 KiB of recent output. */
 export const DEFAULT_RING_BYTES = 256 * 1024
@@ -71,7 +116,7 @@ export class Session {
   readonly #streamId: number
   readonly #ring: ByteRing
   readonly #mirror: Mirror
-  readonly #subscribers = new Set<SessionSink>()
+  readonly #subscribers = new Set<Subscriber>()
   readonly #backendOutputSub: Disposable
   readonly #backendExitSub: Disposable
 
@@ -162,8 +207,14 @@ export class Session {
    * screen, then every subsequent live frame until it unsubscribes. If the
    * session has already ended it receives the snapshot followed by an `Ended`
    * frame. Returns an unsubscribe function.
+   *
+   * An optional {@link SinkFlow} makes the subscription backpressure-aware (see
+   * the module's "Flow control" section): the session pauses live delivery to this
+   * sink alone when its transport is not writable and resyncs it on drain, so a
+   * slow viewer cannot grow host memory or stall its peers. Omitting `flow` keeps
+   * the unconditional fan-out — the sink is always treated as writable.
    */
-  subscribe(sink: SessionSink): () => void {
+  subscribe(sink: SessionSink, flow?: SinkFlow): () => void {
     if (this.#disposed) throw new Error('Session: cannot subscribe to a disposed session')
 
     // Emitting the snapshot and registering the sink happen with no `await`
@@ -171,8 +222,18 @@ export class Session {
     this.#emitSnapshot(sink)
     if (this.#ended) this.#emitTo(sink, PtyOpcode.Ended, encodeExitPayload(null), this.#endedSeq)
 
-    this.#subscribers.add(sink)
-    return () => void this.#subscribers.delete(sink)
+    const subscriber: Subscriber = { sink, flow, paused: false, missed: false }
+    // On a live session with a flow-controlled sink, wire drain-driven resume and,
+    // if the snapshot already backed the transport up, pause before any live frame
+    // (nothing dropped yet, so the resume is a plain catch-up unless frames arrive
+    // while paused). A drain can only fire on a later tick, after this registration.
+    if (flow && !this.#ended) {
+      flow.onDrain(() => this.#resumeSubscriber(subscriber))
+      if (!flow.writable()) subscriber.paused = true
+    }
+
+    this.#subscribers.add(subscriber)
+    return () => void this.#subscribers.delete(subscriber)
   }
 
   // --- Input & control -----------------------------------------------------
@@ -302,12 +363,48 @@ export class Session {
 
   // --- Frame plumbing ------------------------------------------------------
 
-  /** Emit a live frame to all subscribers with the next seq; returns that seq. */
+  /**
+   * Emit a live frame to all subscribers with the next seq; returns that seq.
+   *
+   * Per-subscriber backpressure: a paused sink is skipped (and its gap recorded)
+   * for every non-terminal opcode, so one stalled viewer neither buffers here nor
+   * blocks the others in this same loop. A delivery that pushes a sink's transport
+   * past its high-water mark pauses that sink — and only that sink — until it
+   * drains. `Ended` is terminal and forced through even to a paused sink: it is
+   * tiny and closes the stream, so no viewer is left hanging on a dropped exit.
+   */
   #broadcast(opcode: PtyOpcode, payload: Uint8Array): number {
     const seq = ++this.#seq
     const frame = encodePtyFrame({ opcode, streamId: this.#streamId, seq, payload })
-    for (const sink of this.#subscribers) sink(frame)
+    const terminal = opcode === PtyOpcode.Ended
+    for (const sub of this.#subscribers) {
+      if (sub.paused && !terminal) {
+        sub.missed = true
+        continue
+      }
+      sub.sink(frame)
+      if (!terminal && sub.flow && !sub.flow.writable()) sub.paused = true
+    }
     return seq
+  }
+
+  /**
+   * Resume a paused subscriber when its transport drains. If frames were dropped
+   * while it was paused, heal the gap from authoritative state — a `Gap` marker
+   * then a fresh snapshot at the current seq — before live delivery continues; if
+   * that resync itself refills the transport, stay paused for the next drain. A
+   * subscriber unsubscribed (or dropped when the session ended, which clears all
+   * subscribers) since it paused is no longer tracked, so a late drain is a
+   * harmless no-op — the membership check makes stale drain callbacks safe.
+   */
+  #resumeSubscriber(sub: Subscriber): void {
+    if (!this.#subscribers.has(sub) || !sub.paused) return
+    sub.paused = false
+    if (!sub.missed) return
+    sub.missed = false
+    this.#emitTo(sub.sink, PtyOpcode.Gap, new Uint8Array(0), this.#seq)
+    this.#emitSnapshot(sub.sink)
+    if (sub.flow && !sub.flow.writable()) sub.paused = true
   }
 
   /** Emit one frame to a single sink at an explicit seq (used for snapshots). */

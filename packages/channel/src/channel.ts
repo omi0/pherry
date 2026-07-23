@@ -67,6 +67,26 @@ export interface Duplex {
   onMessage(handler: (bytes: Uint8Array) => void): void
   /** Tear down the transport. */
   close(): void
+  /**
+   * OPTIONAL backpressure signal. `false` means the transport's write buffer has
+   * reached its high-water mark: a further {@link send} is still accepted (never
+   * dropped) but grows the buffer, so a producer should pause and await
+   * {@link onDrain} before sending more. A transport that does no buffering — an
+   * in-memory pair, a message channel, the iOS `ByteTransport` — omits this
+   * member and is treated as always writable, leaving the happy path byte-for-byte
+   * unchanged. Consumers feature-detect it (default `true` when absent); adding it
+   * never breaks a duplex that does not implement it.
+   */
+  readonly writable?: boolean
+  /**
+   * OPTIONAL backpressure hook, paired with {@link writable}: register a handler
+   * invoked each time the transport transitions back to writable (its buffer
+   * drained below the high-water mark). Multiple handlers may be registered. A
+   * transport with no write buffer omits this member (and {@link writable}), so a
+   * consumer feature-detects it via `typeof duplex.onDrain === 'function'` — mirror
+   * of how {@link import('@pherry/relay-core').Cell} feature-detects `onPeerClose`.
+   */
+  onDrain?(handler: () => void): void
 }
 
 /** Configuration common to both channel roles. */
@@ -256,6 +276,33 @@ export class SecureChannel {
     new DataView(framed.buffer).setUint32(0, record.length, false)
     framed.set(record, LENGTH_PREFIX_BYTES)
     this.#duplex.send(framed)
+  }
+
+  /**
+   * Whether the underlying transport can accept another {@link send} without its
+   * write buffer growing past the high-water mark — a pure passthrough of the
+   * duplex's optional {@link Duplex.writable} signal. A transport that reports no
+   * writability (an in-memory pair, the iOS `ByteTransport`) is always writable,
+   * so this returns `true` and the channel imposes no flow control of its own: it
+   * adds only O(1) framing per send and never queues frames. The crypto and record
+   * layers are untouched; this surfaces transport state so a consumer (the host's
+   * PTY fan-out) can apply per-subscriber backpressure instead of letting the
+   * socket buffer grow without bound.
+   */
+  get writable(): boolean {
+    return this.#duplex.writable ?? true
+  }
+
+  /**
+   * Register a handler invoked when the transport drains (becomes {@link writable}
+   * again), delegating to the duplex's optional {@link Duplex.onDrain}. Over a
+   * transport with no backpressure signal this is an inert no-op that never fires —
+   * so a consumer can wire drain-driven resumption unconditionally, and a
+   * non-buffering transport simply never pauses. Multiple handlers may be
+   * registered; each fires on every drain.
+   */
+  onDrain(handler: () => void): void {
+    this.#duplex.onDrain?.(handler)
   }
 
   /** Close the channel and its duplex. Idempotent. */

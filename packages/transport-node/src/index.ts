@@ -11,7 +11,7 @@
  */
 
 export { nodeSocketDuplex } from './node-socket.js'
-export { connectUnix, listenUnix } from './unix.js'
+export { SOCKET_HIGH_WATER_MARK, connectUnix, listenUnix } from './unix.js'
 export type { ListeningServer } from './unix.js'
 
 // Re-exported for convenience: the transport's surface is expressed in the

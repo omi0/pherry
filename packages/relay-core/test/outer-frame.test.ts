@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   MAX_OUTER_MESSAGE_BYTES,
+  MAX_PREHANDLER_RAW_BYTES,
   OUTER_LENGTH_PREFIX_BYTES,
   OuterConnection,
   OuterFrameError,
@@ -129,5 +130,47 @@ describe('OuterConnection mode switch', () => {
     const seen: Uint8Array[] = []
     conn.onRaw((bytes) => seen.push(bytes))
     expect(dec(concat(seen))).toBe('onetwothree')
+  })
+})
+
+// Defence-in-depth for the brief pre-handler window (post-`toRaw`, pre-`onRaw`): a
+// hostile relay that blasts bytes before a raw consumer registers must not grow the
+// buffer without bound. Legit traffic in this window is only a ~32-byte handshake.
+describe('OuterConnection pre-handler raw buffer cap', () => {
+  it('closes with a framing error when queued raw bytes exceed the cap before a consumer registers', () => {
+    const controllable = controllableDuplex()
+    const conn = new OuterConnection(controllable.duplex)
+    let error: Error | undefined
+    conn.onError((e) => {
+      error = e
+    })
+    // Enter the raw phase but never register onRaw — bytes must queue, then be capped.
+    conn.onMessage((message) => {
+      if (message.t === 'data-ready') conn.toRaw()
+    })
+    controllable.deliver(encodeOuterMessage({ t: 'data-ready' }))
+    controllable.deliver(new Uint8Array(MAX_PREHANDLER_RAW_BYTES + 1))
+    expect(error).toBeInstanceOf(OuterFrameError)
+    expect(conn.closed).toBe(true)
+    expect(controllable.closed()).toBe(true)
+  })
+
+  it('allows buffering up to the cap and flushes it to a late consumer without error', () => {
+    const controllable = controllableDuplex()
+    const conn = new OuterConnection(controllable.duplex)
+    let error: Error | undefined
+    conn.onError((e) => {
+      error = e
+    })
+    conn.onMessage((message) => {
+      if (message.t === 'data-ready') conn.toRaw()
+    })
+    controllable.deliver(encodeOuterMessage({ t: 'data-ready' }))
+    controllable.deliver(new Uint8Array(MAX_PREHANDLER_RAW_BYTES)) // exactly at cap: allowed
+    const seen: Uint8Array[] = []
+    conn.onRaw((bytes) => seen.push(bytes))
+    expect(error).toBeUndefined()
+    expect(conn.closed).toBe(false)
+    expect(concat(seen).length).toBe(MAX_PREHANDLER_RAW_BYTES)
   })
 })

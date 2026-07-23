@@ -48,6 +48,7 @@ export {
 // Outer framing
 export {
   MAX_OUTER_MESSAGE_BYTES,
+  MAX_PREHANDLER_RAW_BYTES,
   OUTER_LENGTH_PREFIX_BYTES,
   OuterConnection,
   OuterFrameError,

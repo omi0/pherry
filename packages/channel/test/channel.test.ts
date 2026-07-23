@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   type ChannelFrame,
   DecryptError,
+  type Duplex,
   FrameTag,
   HandshakeError,
   MAX_RECORD_BYTES,
@@ -536,5 +537,62 @@ describe('SecureChannel', () => {
     await settle()
     expect(closedWith).toBeInstanceOf(DecryptError)
     await expect(authPromise).rejects.toBeInstanceOf(DecryptError)
+  })
+})
+
+// Backpressure is a pure passthrough of the transport's optional writability: the
+// channel adds no flow control of its own, it only surfaces the duplex's signal so
+// a consumer (the host fan-out) can pause a stalled sink. A transport that reports
+// nothing is always writable — the happy path is unchanged.
+describe('SecureChannel backpressure passthrough', () => {
+  it('reports always-writable and an inert onDrain over a duplex with no backpressure signal', () => {
+    // memoryDuplexPair endpoints implement only send/onMessage/close.
+    const { a } = memoryDuplexPair()
+    const channel = new SecureChannel({
+      role: 'initiator',
+      duplex: a,
+      pinnedHostStatic: generateKeyPair().publicKey,
+    })
+    expect(channel.writable).toBe(true)
+    // Registering a drain handler is safe and simply never fires.
+    let fired = 0
+    channel.onDrain(() => {
+      fired += 1
+    })
+    expect(fired).toBe(0)
+  })
+
+  it('surfaces the duplex writable signal and forwards drain notifications', () => {
+    let writable = true
+    const drainHandlers = new Set<() => void>()
+    const duplex: Duplex = {
+      send() {},
+      onMessage() {},
+      close() {},
+      get writable() {
+        return writable
+      },
+      onDrain(handler) {
+        drainHandlers.add(handler)
+      },
+    }
+    const channel = new SecureChannel({
+      role: 'initiator',
+      duplex,
+      pinnedHostStatic: generateKeyPair().publicKey,
+    })
+    // The channel reflects the live transport state...
+    expect(channel.writable).toBe(true)
+    writable = false
+    expect(channel.writable).toBe(false)
+    // ...and a duplex drain reaches a handler registered on the channel.
+    let resumes = 0
+    channel.onDrain(() => {
+      resumes += 1
+    })
+    writable = true
+    for (const handler of drainHandlers) handler()
+    expect(channel.writable).toBe(true)
+    expect(resumes).toBe(1)
   })
 })

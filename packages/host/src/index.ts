@@ -30,7 +30,7 @@ export {
   SNAPSHOT_CHUNK_BYTES,
   Session,
 } from './session/session.js'
-export type { SessionOptions, SessionSink } from './session/session.js'
+export type { SessionOptions, SessionSink, SinkFlow } from './session/session.js'
 export { SessionRegistry } from './session/registry.js'
 export { openSession, spawnSession } from './session/spawn.js'
 export type { OpenSessionOptions } from './session/spawn.js'
