@@ -80,7 +80,7 @@ export {
 } from './envelope.js'
 
 // Method registry
-export { METHODS, defineMethod } from './methods.js'
+export { METHOD_CAPABILITY, METHODS, defineMethod, requiredCapability } from './methods.js'
 export type { MethodDescriptor, MethodName, ParamsOf, ResultOf } from './methods.js'
 
 // Binary PTY frames

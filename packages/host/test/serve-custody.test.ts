@@ -19,6 +19,7 @@ import {
   SessionRegistry,
   serveConnection,
 } from '../src/index.js'
+import { controllerHello } from './hello.js'
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -69,11 +70,26 @@ function linkedDuplex(): { a: Duplex; b: Duplex } {
   return { a, b }
 }
 
-/** A minimal RPC client over an initiator channel: send a request, await its reply by id. */
+/**
+ * A minimal RPC client over an initiator channel: send a request, await its reply
+ * by id. It completes the leg-M22 handshake first — sends a controller `Hello` and
+ * consumes the host's HelloAck (the first control frame) — before any RPC.
+ */
 function rawClient(channel: SecureChannel) {
   const pending = new Map<string, (frame: ResponseFrame) => void>()
+  let negotiated = false
+  let onNegotiated: () => void = () => {}
+  const ready = new Promise<void>((resolve) => {
+    onNegotiated = resolve
+  })
   channel.onFrame((frame) => {
     if (frame.tag !== FrameTag.Control) return
+    if (!negotiated) {
+      // The first control frame is the host's HelloAck; consume it.
+      negotiated = true
+      onNegotiated()
+      return
+    }
     const reply = ResponseFrame.parse(JSON.parse(decoder.decode(frame.payload)))
     const resolve = pending.get(reply.id)
     if (resolve) {
@@ -81,8 +97,10 @@ function rawClient(channel: SecureChannel) {
       resolve(reply)
     }
   })
+  channel.send(controllerHello())
   let seq = 0
   return {
+    ready,
     call(method: string, params: unknown): Promise<ResponseFrame> {
       const id = `req-${++seq}`
       return new Promise<ResponseFrame>((resolve) => {
@@ -141,8 +159,9 @@ async function setup(opts: { hooks?: false; now?: () => number } = {}) {
     pinnedHostStatic: hostStatic.publicKey,
   })
   const served = serveConnection(channelA, registry, options)
-  const client = rawClient(channelB)
   await Promise.all([channelA.ready(), channelB.ready()])
+  const client = rawClient(channelB) // channel open: sends Hello, consumes the HelloAck
+  await client.ready
 
   return { registry, backend, desk, served, client, channelA, channelB }
 }

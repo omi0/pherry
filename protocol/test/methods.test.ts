@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { METHODS, newSessionRef } from '../src/index.js'
+import {
+  METHODS,
+  METHOD_CAPABILITY,
+  PTY_STREAM,
+  SESSION_INPUT,
+  newSessionRef,
+  requiredCapability,
+} from '../src/index.js'
 
 const sref = newSessionRef()
 
@@ -114,5 +121,30 @@ describe('METHODS registry', () => {
     expect(METHODS['sessions.list'].params.safeParse({}).success).toBe(true)
     expect(METHODS['sessions.list'].result.safeParse({ sessions: [] }).success).toBe(true)
     expect(METHODS['sessions.list'].result.safeParse({}).success).toBe(false)
+  })
+})
+
+describe('METHOD_CAPABILITY — the method -> required-capability gate', () => {
+  it('gates the feature methods on their capability', () => {
+    expect(requiredCapability('session.subscribe')).toBe(PTY_STREAM)
+    expect(requiredCapability('session.input')).toBe(SESSION_INPUT)
+    expect(requiredCapability('session.resize')).toBe(SESSION_INPUT)
+    expect(METHOD_CAPABILITY['session.subscribe']).toBe(PTY_STREAM)
+  })
+
+  it('leaves lifecycle / discovery / host-config methods ungated', () => {
+    expect(requiredCapability('session.unsubscribe')).toBeUndefined()
+    expect(requiredCapability('sessions.list')).toBeUndefined()
+    expect(requiredCapability('custody.reserve')).toBeUndefined()
+    expect(requiredCapability('custody.claim')).toBeUndefined()
+  })
+
+  it('only ever names a capability the build knows how to negotiate', () => {
+    // Every gated capability must be a real, advertisable string — otherwise a
+    // method could never be negotiated and would refuse closed forever.
+    for (const cap of Object.values(METHOD_CAPABILITY)) {
+      expect(typeof cap).toBe('string')
+      expect(cap.length).toBeGreaterThan(0)
+    }
   })
 })

@@ -3,12 +3,25 @@
  * {@link SessionRegistry} and serve the controller RPCs over it.
  *
  * This is the host end of the wire, expressed as a **pure function over its two
- * injected collaborators** — the channel and the registry. It owns no sockets
- * and performs no handshake: the caller hands it a channel that is (or will be)
- * open, and it wires the channel's inbound {@link ChannelFrame}s to session
- * operations and the resulting PTY frames back onto the channel.
+ * injected collaborators** — the channel and the registry. It owns no sockets and
+ * drives no *crypto* handshake (the {@link SecureChannel} already did that); the
+ * caller hands it a channel that is (or will be) open, and it wires the channel's
+ * inbound {@link ChannelFrame}s to session operations and the resulting PTY frames
+ * back onto the channel.
  *
- * Control frames are decoded as protocol {@link RpcRequest}s and dispatched:
+ * **Capability handshake (leg-M22).** The first control frame on the channel MUST
+ * be a controller {@link Hello}; the host replies a `HelloAck` with its
+ * {@link PROTOCOL_VERSION} and served capabilities, then serves RPC. It fails
+ * **closed** on skew: an incompatible protocol version closes the channel (after
+ * emitting the HelloAck so the peer can diagnose it, reporting `VERSION_INCOMPATIBLE`
+ * locally); a wrong or absent first frame — an un-upgraded peer that went straight
+ * to RPC, or silence past a bounded window — closes it too. Once negotiated, each
+ * feature method is gated on its required capability ({@link requiredCapability}):
+ * a de-negotiated capability is refused `FORBIDDEN`, distinct from the
+ * `METHOD_NOT_FOUND` an unknown / unserved method gets.
+ *
+ * Control frames after the handshake are decoded as protocol {@link RpcRequest}s
+ * and dispatched:
  *
  *  - `session.subscribe` attaches a {@link SessionSink} that wraps each PTY frame
  *    as a {@link binaryFrame} and sends it; the ack (carrying `streamId` /
@@ -40,15 +53,24 @@ import { FrameTag, binaryFrame, controlFrame } from '@pherry/channel'
 import type { ChannelFrame, SecureChannel } from '@pherry/channel'
 import {
   ErrorCode,
+  Hello,
+  type HelloAck,
   METHODS,
+  MIRROR_SNAPSHOT,
   type MethodName,
+  PROTOCOL_VERSION,
+  PTY_STREAM,
   type ParamsOf,
   type ResultOf,
   type RpcError,
   RpcRequest,
   type RpcSuccess,
+  SESSION_INPUT,
   type SessionRef,
+  evaluateCompat,
   failure,
+  negotiate,
+  requiredCapability,
   success,
 } from '@pherry/protocol'
 import { CustodyError } from '../custody/open.js'
@@ -57,6 +79,20 @@ import type { Session } from '../session/session.js'
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
+
+/**
+ * Bounded window (ms) for the controller to send its opening {@link Hello} before
+ * the host closes the channel (fail closed). Generous — the handshake frame is the
+ * first thing a compatible controller emits after the channel opens.
+ */
+const DEFAULT_NEGOTIATION_TIMEOUT_MS = 10_000
+
+/**
+ * The mirror-and-steer capability surface this host leg serves by default: it
+ * streams the PTY mirror ({@link PTY_STREAM}) with an initial snapshot
+ * ({@link MIRROR_SNAPSHOT}) and accepts input / resize ({@link SESSION_INPUT}).
+ */
+const DEFAULT_SERVED_CAPABILITIES: readonly string[] = [PTY_STREAM, MIRROR_SNAPSHOT, SESSION_INPUT]
 
 /** One live subscription created by this connection. */
 interface Subscription {
@@ -101,6 +137,18 @@ export interface ServeConnectionOptions {
    * whatever this returns; when absent it answers `METHOD_NOT_FOUND`.
    */
   listSessions?: () => ResultOf<'sessions.list'>['sessions']
+  /**
+   * The capabilities this connection advertises in its HelloAck and enforces — the
+   * negotiated set is the intersection with the controller's {@link Hello}.
+   * Defaults to {@link DEFAULT_SERVED_CAPABILITIES} (the mirror-and-steer surface
+   * this leg serves); override to restrict what a build offers.
+   */
+  capabilities?: readonly string[]
+  /**
+   * Bounded window (ms) for the controller to send its opening {@link Hello} before
+   * the host closes the channel. Default {@link DEFAULT_NEGOTIATION_TIMEOUT_MS}.
+   */
+  negotiationTimeoutMs?: number
 }
 
 /** Handle to a served connection: introspect its subscriptions and tear it down. */
@@ -138,6 +186,26 @@ export function serveConnection(
   const touched = new Set<Session>()
   let closed = false
 
+  const servedCapabilities = options.capabilities ?? DEFAULT_SERVED_CAPABILITIES
+  // Negotiation phase (leg-M22). The first control frame MUST be a Hello; until it
+  // arrives we serve no RPC. A compatible Hello moves us to `serving` holding the
+  // negotiated capability set; an incompatible version, a wrong first frame, a
+  // silent peer, or connection close moves us to `dead` (serve nothing).
+  let phase: 'awaiting-hello' | 'serving' | 'dead' = 'awaiting-hello'
+  let negotiated = new Set<string>()
+
+  // Bounded window: a peer that connects and never sends Hello is closed (fail
+  // closed). Cleared the instant the Hello is handled or the connection tears down;
+  // unref'd so a pending window never keeps a host daemon alive.
+  const negotiationTimer = setTimeout(() => {
+    if (phase !== 'awaiting-hello') return
+    phase = 'dead'
+    options.onError?.(new Error('handshake timeout: controller sent no Hello'))
+    channel.close()
+  }, options.negotiationTimeoutMs ?? DEFAULT_NEGOTIATION_TIMEOUT_MS)
+  negotiationTimer.unref?.()
+  const clearNegotiationTimer = (): void => clearTimeout(negotiationTimer)
+
   // Per-subscription resume callbacks for the backpressure policy: `session.ts`
   // pauses a stalled sink and hands us its resume closure via the subscription's
   // `SinkFlow.onDrain`; we route the channel's *single* transport-drain signal to
@@ -150,8 +218,75 @@ export function serveConnection(
     for (const resume of resumers.values()) resume()
   })
 
-  const send = (frame: RpcSuccess | RpcError): void => {
-    if (!closed) channel.send(controlFrame(encoder.encode(JSON.stringify(frame))))
+  const sendControl = (value: unknown): void => {
+    if (!closed) channel.send(controlFrame(encoder.encode(JSON.stringify(value))))
+  }
+  const send = (frame: RpcSuccess | RpcError): void => sendControl(frame)
+
+  /**
+   * Base64 of the channel's 32-byte session id — the advisory channel-binding token
+   * echoed in the HelloAck (see leg-M22 § publicKey). Identity is already proven by
+   * the pinned Noise-NK channel, so this is a binding record, not a gate.
+   */
+  const channelBinding = (): string =>
+    channel.sessionId ? Buffer.from(channel.sessionId).toString('base64') : ''
+
+  /** Tear the connection down and close the channel — the fail-closed exit. */
+  const failClosed = (reason: string): void => {
+    phase = 'dead'
+    clearNegotiationTimer()
+    options.onError?.(new Error(reason))
+    channel.close()
+  }
+
+  /**
+   * Handle the controller's opening {@link Hello} (the first control frame). Always
+   * answer HelloAck with our version + served capabilities so the peer can diagnose
+   * an incompatibility precisely, then either fail closed on skew or move to
+   * `serving` holding the negotiated (intersected) capability set.
+   */
+  const handleHello = (payload: Uint8Array): void => {
+    clearNegotiationTimer()
+    let hello: Hello
+    try {
+      hello = Hello.parse(JSON.parse(decoder.decode(payload)))
+    } catch {
+      // A first control frame that is not a Hello: an un-upgraded controller that
+      // went straight to RPC, or garbage. Fail closed before serving anything.
+      failClosed('handshake violation: first control frame was not a Hello')
+      return
+    }
+    const ack: HelloAck = {
+      protocol: PROTOCOL_VERSION,
+      capabilities: [...servedCapabilities],
+      publicKey: channelBinding(),
+    }
+    sendControl(ack)
+    const compat = evaluateCompat(hello.protocol)
+    if (!compat.ok) {
+      // Incompatible major — fail closed (the HelloAck above carried our version so
+      // the controller can report VERSION_INCOMPATIBLE with the reason).
+      failClosed(`version incompatible: controller protocol ${hello.protocol} (${compat.reason})`)
+      return
+    }
+    negotiated = negotiate(servedCapabilities, hello.capabilities)
+    phase = 'serving'
+  }
+
+  /**
+   * The capability gate for a served feature method: refuse `FORBIDDEN` — distinct
+   * from `METHOD_NOT_FOUND` — when the method's required capability was not
+   * negotiated. Returns `false` (and replies) when the method is denied.
+   */
+  const capabilityAllows = (id: string, method: MethodName): boolean => {
+    const cap = requiredCapability(method)
+    if (cap && !negotiated.has(cap)) {
+      send(
+        failure(id, ErrorCode.Forbidden, `capability not negotiated: ${cap}`, { capability: cap }),
+      )
+      return false
+    }
+    return true
   }
 
   /**
@@ -170,6 +305,8 @@ export function serveConnection(
   }
 
   const teardownAll = (): void => {
+    phase = 'dead'
+    clearNegotiationTimer()
     for (const sub of subscriptions.values()) sub.unsubscribe()
     subscriptions.clear()
     resumers.clear()
@@ -180,6 +317,20 @@ export function serveConnection(
   }
 
   const handleSubscribe = (id: string, params: ParamsOf<'session.subscribe'>): void => {
+    // A per-stream capability list may narrow within the negotiated set but never
+    // escalate past it — refuse closed on any capability the channel did not
+    // negotiate (leg-M22 § SessionSubscribe.capabilities).
+    if (params.capabilities) {
+      const escalated = params.capabilities.find((cap) => !negotiated.has(cap))
+      if (escalated !== undefined) {
+        send(
+          failure(id, ErrorCode.Forbidden, `capability not negotiated: ${escalated}`, {
+            capability: escalated,
+          }),
+        )
+        return
+      }
+    }
     const session = registry.get(params.sessionRef)
     if (!session) {
       send(failure(id, ErrorCode.NotFound, `no such session: ${params.sessionRef}`))
@@ -301,12 +452,15 @@ export function serveConnection(
     }
     switch (method) {
       case 'session.subscribe':
+        if (!capabilityAllows(request.id, method)) return
         handleSubscribe(request.id, parsed.data as ParamsOf<'session.subscribe'>)
         return
       case 'session.input':
+        if (!capabilityAllows(request.id, method)) return
         handleInput(request.id, parsed.data as ParamsOf<'session.input'>)
         return
       case 'session.resize':
+        if (!capabilityAllows(request.id, method)) return
         handleResize(request.id, parsed.data as ParamsOf<'session.resize'>)
         return
       case 'session.unsubscribe':
@@ -344,6 +498,13 @@ export function serveConnection(
   }
 
   const onControl = (payload: Uint8Array): void => {
+    // The connection is dead (failed negotiation / torn down): serve nothing.
+    if (phase === 'dead') return
+    // The first control frame must be the handshake; RPC only flows after it.
+    if (phase === 'awaiting-hello') {
+      handleHello(payload)
+      return
+    }
     let request: RpcRequest
     try {
       request = RpcRequest.parse(JSON.parse(decoder.decode(payload)))

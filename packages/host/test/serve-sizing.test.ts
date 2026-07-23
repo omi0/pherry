@@ -8,6 +8,7 @@ import {
 import { ResponseFrame } from '@pherry/protocol'
 import { describe, expect, it } from 'vitest'
 import { FakeBackend, SessionRegistry, serveConnection, spawnSession } from '../src/index.js'
+import { controllerHello } from './hello.js'
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -53,11 +54,26 @@ function linkedDuplex(): { a: Duplex; b: Duplex } {
   return { a, b }
 }
 
-/** A minimal RPC client over an initiator channel: send a request, await its reply by id. */
+/**
+ * A minimal RPC client over an initiator channel: send a request, await its reply
+ * by id. It completes the leg-M22 handshake first (Hello → consume HelloAck) — the
+ * channel must be open when this is constructed.
+ */
 function rawClient(channel: SecureChannel) {
   const pending = new Map<string, (frame: ResponseFrame) => void>()
+  let negotiated = false
+  let onNegotiated: () => void = () => {}
+  const ready = new Promise<void>((resolve) => {
+    onNegotiated = resolve
+  })
   channel.onFrame((frame) => {
     if (frame.tag !== FrameTag.Control) return
+    if (!negotiated) {
+      // The first control frame is the host's HelloAck; consume it.
+      negotiated = true
+      onNegotiated()
+      return
+    }
     const reply = ResponseFrame.parse(JSON.parse(decoder.decode(frame.payload)))
     const resolve = pending.get(reply.id)
     if (resolve) {
@@ -65,8 +81,10 @@ function rawClient(channel: SecureChannel) {
       resolve(reply)
     }
   })
+  channel.send(controllerHello())
   let seq = 0
   return {
+    ready,
     call(method: string, params: unknown): Promise<ResponseFrame> {
       const id = `req-${++seq}`
       return new Promise<ResponseFrame>((resolve) => {
@@ -98,7 +116,9 @@ async function setup() {
       pinnedHostStatic: hostKey.publicKey,
     })
     await initiator.ready()
-    return { client: rawClient(initiator), served, channel: initiator }
+    const client = rawClient(initiator)
+    await client.ready
+    return { client, served, channel: initiator }
   }
 
   return { session, mac: await connect(), phone: await connect() }

@@ -43,6 +43,7 @@ public actor SecureChannel {
     private var inboundBuffer = Data()
     private var sealer: RecordSealer?
     private var opener: RecordOpener?
+    private var sessionIdData: Data?
     private var open = false
     private var closed = false
     private var started = false
@@ -141,6 +142,12 @@ public actor SecureChannel {
         }
     }
 
+    /// The derived 32-byte session id, available once the handshake completes (else `nil`) —
+    /// the Swift analogue of the reference channel's `sessionId`. Used as the advisory
+    /// channel-binding echoed in the leg-M22 `Hello`; it is a nonce base, not secret key
+    /// material, so exposing it read-only is safe.
+    public var sessionId: Data? { sessionIdData }
+
     /// Suspend until the handshake completes (records may flow), or throw if the channel closes
     /// first. This is the Swift analogue of the reference channel's `ready()` — **provisional**
     /// authentication (an on-path attacker can make it resolve); the real proof is
@@ -209,6 +216,7 @@ public actor SecureChannel {
     private func completeHandshake(_ peerMessage: Data) throws -> Data? {
         guard let handshake else { return nil }
         let keys = try handshake.consume(peerEphemeralPub: peerMessage, context: context)
+        sessionIdData = keys.sessionId
         var outgoing: Data?
         switch role {
         case .initiator:

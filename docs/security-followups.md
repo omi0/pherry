@@ -70,6 +70,14 @@ the gap cleanly. Do each as its own reviewed change.
   break today; it is a forward-compatibility gap.
 - **Fix shape.** Its own leg: `docs/leg-*.md` spec first, then protocol + host + sdk + iOS, with
   regenerated conformance vectors and an auth-matrix test that a disabled capability refuses closed.
+- **Status: FIXED** — see [`leg-M22.md`](./leg-M22.md). `Hello`/`HelloAck` are now the first control
+  frames on every channel (host `serve-connection.ts`, sdk `controller.ts`, iOS `ControllerClient`);
+  an incompatible `PROTOCOL_VERSION` fails closed on both ends (`VERSION_INCOMPATIBLE` + close), and
+  each feature method gates on its negotiated capability — a de-negotiated capability is refused
+  `FORBIDDEN`, distinct from `METHOD_NOT_FOUND` (auth-matrix test). A peer that never sends `Hello`
+  is closed (wrong first frame, or silence past a bounded window). The inner RPC has no conformance
+  vectors, so iOS is covered by the scripted-transport tests; no wire schema or vector changed.
+  `SessionSubscribe.capabilities` became a per-stream escalation guard.
 
 ### H7 (network half) — `/internal/relay/*` must live on a private listener
 

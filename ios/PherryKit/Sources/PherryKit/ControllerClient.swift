@@ -70,6 +70,14 @@ public actor ControllerClient {
     private var streams: [UInt32: StreamSink] = [:]
     private var closed = false
 
+    // Capability handshake (leg-M22): the controller sends `Hello` as its first control
+    // frame, awaits `HelloAck`, and fails closed on an incompatible protocol version.
+    // Every request gates on `ensureNegotiated()`.
+    private let capabilities: [String]
+    private var negotiated = false
+    private var negotiationError: Error?
+    private var negotiationWaiters: [CheckedContinuation<Void, Error>] = []
+
     /// A live subscription — its decoded ``PtyEvent`` stream.
     public struct Subscription: Sendable {
         /// The decoded event stream: a `snapshot` first, then live `output` / `resized` / `gap`,
@@ -77,10 +85,12 @@ public actor ControllerClient {
         public let events: AsyncThrowingStream<PtyEvent, Error>
     }
 
-    /// Wrap `channel`. Starts the channel and begins consuming its inbound frames immediately,
-    /// so it is safe to construct before the channel is open.
+    /// Wrap `channel`. Starts the channel, drives the leg-M22 capability handshake (`Hello` →
+    /// `HelloAck`), and begins consuming its inbound frames — so it is safe to construct
+    /// before the channel is open.
     public init(channel: SecureChannel) {
         self.channel = channel
+        self.capabilities = PherryProtocol.controllerCapabilities
         Task { await self.run() }
     }
 
@@ -134,8 +144,10 @@ public actor ControllerClient {
         subscription: StreamSink? = nil
     ) async throws -> [String: Any] {
         // Wait for the handshake so the first request never races it (the reference client
-        // awaits `channel.ready()` before its first RPC).
+        // awaits `channel.ready()` before its first RPC), then for the leg-M22 negotiation
+        // (Hello/HelloAck) — which fails closed on an incompatible host version.
         try await channel.waitUntilOpen()
+        try await ensureNegotiated()
         let id = UUID().uuidString
         let requestData = try Rpc.encodeRequest(id: id, method: method, params: params)
         return try await withCheckedThrowingContinuation { continuation in
@@ -163,6 +175,8 @@ public actor ControllerClient {
     private func run() async {
         await channel.start()
         do {
+            try await channel.waitUntilOpen()
+            try await sendHello()
             for try await frame in channel.frames {
                 handleFrame(frame)
             }
@@ -170,6 +184,39 @@ public actor ControllerClient {
         } catch {
             teardown(error)
         }
+    }
+
+    /// Send the opening `Hello` — the first control frame — advertising this build's
+    /// version and capabilities. Its `publicKey` is the base64 channel session id (an
+    /// advisory channel-binding; identity is already proven by the pinned channel).
+    private func sendHello() async throws {
+        let publicKey = (await channel.sessionId)?.base64EncodedString() ?? ""
+        let hello = try HandshakeCodec.encodeHello(capabilities: capabilities, publicKey: publicKey)
+        try await channel.send(ChannelFrame(tag: .control, payload: hello))
+    }
+
+    /// Suspend until the handshake completes, or throw the negotiation failure
+    /// (`VERSION_INCOMPATIBLE` on skew, or the channel fault) — so a request fails closed.
+    private func ensureNegotiated() async throws {
+        if negotiated { return }
+        if let error = negotiationError { throw error }
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            negotiationWaiters.append(cont)
+        }
+    }
+
+    /// Settle the negotiation exactly once, releasing every waiter.
+    private func completeNegotiation(_ result: Result<Void, Error>) {
+        guard !negotiated, negotiationError == nil else { return }
+        switch result {
+        case .success:
+            negotiated = true
+            for waiter in negotiationWaiters { waiter.resume() }
+        case let .failure(error):
+            negotiationError = error
+            for waiter in negotiationWaiters { waiter.resume(throwing: error) }
+        }
+        negotiationWaiters.removeAll()
     }
 
     private func handleFrame(_ frame: ChannelFrame) {
@@ -183,6 +230,28 @@ public actor ControllerClient {
     }
 
     private func handleControl(_ payload: Data) {
+        // Before negotiation completes, the first inbound control frame is the HelloAck.
+        if !negotiated, negotiationError == nil {
+            guard let ack = HandshakeCodec.decodeHelloAck(payload) else {
+                completeNegotiation(.failure(RpcClientError(
+                    code: "UNAVAILABLE",
+                    message: "handshake violation: first control frame was not a HelloAck"
+                )))
+                return
+            }
+            switch PherryProtocol.evaluateCompat(ack.protocolVersion) {
+            case .ok:
+                completeNegotiation(.success(()))
+            case .peerTooOld, .selfTooOld:
+                completeNegotiation(.failure(RpcClientError(
+                    code: "VERSION_INCOMPATIBLE",
+                    message: "host protocol \(ack.protocolVersion) is incompatible"
+                )))
+                // Fail closed: tear the channel down so no RPC can proceed.
+                Task { [channel] in await channel.close() }
+            }
+            return
+        }
         guard let response = Rpc.decodeResponse(payload) else { return }
         switch response {
         case let .ok(id, result):
@@ -204,6 +273,8 @@ public actor ControllerClient {
         guard !closed else { return }
         closed = true
         let fault = error ?? ChannelError.closed(nil)
+        // A close mid-handshake fails the negotiation closed (no-op once it has settled).
+        completeNegotiation(.failure(fault))
         for (_, entry) in pending { entry.continuation.resume(throwing: fault) }
         pending.removeAll()
         for (_, sink) in streams { sink.finish(error) }

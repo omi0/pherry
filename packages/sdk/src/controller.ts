@@ -8,9 +8,17 @@
  * the binary PTY frames the host streams back into a decoded {@link PtyEvents}
  * stream per subscription (keyed by the frame's `streamId`).
  *
- * The channel is injected and already (or soon-to-be) open; the Controller owns
- * no sockets and drives no handshake. It registers its frame/close handlers in
- * the constructor, so it is safe to construct before `channel.ready()`.
+ * The channel is injected and already (or soon-to-be) open; the Controller owns no
+ * sockets and drives no *crypto* handshake (the {@link SecureChannel} did that).
+ * It does drive the **capability handshake** (leg-M22): eagerly — as the first
+ * control frame after the channel opens — it sends a `Hello`, awaits the host's
+ * `HelloAck`, and runs {@link negotiateHello}. Every request awaits that outcome
+ * and **fails closed** if it did (an incompatible protocol version rejects
+ * `VERSION_INCOMPATIBLE`; no HelloAck within a bounded window rejects too). The
+ * negotiated capability set is exposed via {@link Controller.negotiated}, and a
+ * call to a method whose capability was not negotiated rejects `FORBIDDEN` locally.
+ * Handlers register in the constructor, so it is safe to construct before
+ * `channel.ready()`.
  *
  * Ordering note: the host sends a subscribe ack *before* the snapshot frames, and
  * the channel preserves order, so the ack — which teaches the Controller the
@@ -21,17 +29,26 @@
 import type { ChannelFrame, SecureChannel } from '@pherry/channel'
 import { FrameTag, controlFrame } from '@pherry/channel'
 import {
-  type ErrorCode,
+  ErrorCode,
+  type HandshakeOutcome,
+  type Hello,
+  HelloAck,
   METHODS,
+  MIRROR_SNAPSHOT,
   type MethodName,
+  PROTOCOL_VERSION,
+  PTY_STREAM,
   type ParamsOf,
   ResponseFrame,
   type ResultOf,
   type RpcRequest,
+  SESSION_INPUT,
   type SessionRef,
   StreamId,
   decodePtyFrame,
+  negotiateHello,
   newRequestId,
+  requiredCapability,
 } from '@pherry/protocol'
 import { type PtyEvent, PtyEventStream, type PtyEvents } from './events.js'
 
@@ -81,6 +98,35 @@ interface TrackedSub {
   readonly stream: PtyEventStream
 }
 
+/**
+ * The mirror-and-steer capabilities a controller advertises by default: it streams
+ * the PTY mirror ({@link PTY_STREAM}) with an initial snapshot
+ * ({@link MIRROR_SNAPSHOT}) and sends input / resize ({@link SESSION_INPUT}).
+ */
+const DEFAULT_CONTROLLER_CAPABILITIES: readonly string[] = [
+  PTY_STREAM,
+  MIRROR_SNAPSHOT,
+  SESSION_INPUT,
+]
+
+/** Default bounded window (ms) to await the host's HelloAck before failing closed. */
+const DEFAULT_NEGOTIATION_TIMEOUT_MS = 10_000
+
+/** Construction options for a {@link Controller}. */
+export interface ControllerOptions {
+  /**
+   * The capabilities this controller advertises in its {@link Hello}; the live set
+   * is the intersection with the host's HelloAck. Defaults to the mirror-and-steer
+   * surface — override to restrict what this controller asks for.
+   */
+  capabilities?: readonly string[]
+  /**
+   * Bounded window (ms) to await the host's HelloAck before failing the negotiation
+   * closed. Default {@link DEFAULT_NEGOTIATION_TIMEOUT_MS}.
+   */
+  negotiationTimeoutMs?: number
+}
+
 export class Controller {
   readonly #channel: SecureChannel
   readonly #pending = new Map<string, Pending>()
@@ -88,10 +134,35 @@ export class Controller {
   readonly #subsByRef = new Map<SessionRef, TrackedSub>()
   #closed = false
 
-  constructor(channel: SecureChannel) {
+  // Capability handshake (leg-M22): the negotiated outcome every request awaits.
+  readonly #capabilities: readonly string[]
+  readonly #negotiationTimeoutMs: number
+  readonly #negotiated: Promise<HandshakeOutcome>
+  #awaitingHelloAck = false
+  #resolveHelloAck: ((ack: HelloAck) => void) | undefined
+  #rejectHelloAck: ((error: Error) => void) | undefined
+  #negotiationTimer: ReturnType<typeof setTimeout> | undefined
+
+  constructor(channel: SecureChannel, options: ControllerOptions = {}) {
     this.#channel = channel
+    this.#capabilities = options.capabilities ?? DEFAULT_CONTROLLER_CAPABILITIES
+    this.#negotiationTimeoutMs = options.negotiationTimeoutMs ?? DEFAULT_NEGOTIATION_TIMEOUT_MS
     channel.onFrame((frame) => this.#onFrame(frame))
     channel.onClose((error) => this.#onClose(error))
+    // Eagerly negotiate so Hello is the first control frame we emit; every request
+    // awaits this and rejects if it failed closed (version skew / handshake timeout).
+    this.#negotiated = this.#negotiate()
+    this.#negotiated.catch(() => {})
+  }
+
+  /**
+   * The handshake outcome — the negotiated capability set and version compat.
+   * Resolves once the host's HelloAck is accepted; **rejects** (fail closed) on an
+   * incompatible protocol version or a handshake timeout. Request methods await
+   * this internally, so callers rarely need it directly.
+   */
+  negotiated(): Promise<HandshakeOutcome> {
+    return this.#negotiated
   }
 
   /**
@@ -158,30 +229,106 @@ export class Controller {
 
   // --- Internals -----------------------------------------------------------
 
-  #send<M extends MethodName>(
+  /**
+   * Drive the capability handshake: await the channel open, send `Hello` as the
+   * first control frame, await `HelloAck` (bounded by {@link #negotiationTimeoutMs}),
+   * then run {@link negotiateHello}. Rejects — failing every request closed — on an
+   * incompatible protocol version or a handshake timeout.
+   */
+  async #negotiate(): Promise<HandshakeOutcome> {
+    await this.#channel.ready()
+    const sessionId = this.#channel.sessionId
+    const local: Hello = {
+      role: 'controller',
+      protocol: PROTOCOL_VERSION,
+      capabilities: [...this.#capabilities],
+      // Advisory channel-binding: the base64 channel session id (see leg-M22).
+      publicKey: sessionId ? Buffer.from(sessionId).toString('base64') : '',
+    }
+    const ackPromise = new Promise<HelloAck>((resolve, reject) => {
+      this.#resolveHelloAck = resolve
+      this.#rejectHelloAck = reject
+    })
+    this.#negotiationTimer = setTimeout(() => {
+      this.#awaitingHelloAck = false
+      this.#rejectHelloAck?.(
+        new RpcClientError(ErrorCode.Unavailable, 'handshake timeout: host sent no HelloAck'),
+      )
+      this.#channel.close()
+    }, this.#negotiationTimeoutMs)
+    this.#negotiationTimer.unref?.()
+    this.#awaitingHelloAck = true
+    try {
+      this.#channel.send(controlFrame(encoder.encode(JSON.stringify(local))))
+    } catch (error) {
+      this.#awaitingHelloAck = false
+      clearTimeout(this.#negotiationTimer)
+      throw asError(error)
+    }
+    const ack = await ackPromise
+    const outcome = negotiateHello(local, ack)
+    if (!outcome.compat.ok) {
+      throw new RpcClientError(
+        ErrorCode.VersionIncompatible,
+        `host protocol ${ack.protocol} incompatible: ${outcome.compat.reason}`,
+        outcome.compat,
+      )
+    }
+    return outcome
+  }
+
+  /** Consume the host's HelloAck (the first inbound control frame) or fail closed. */
+  #handleHelloAck(payload: Uint8Array): void {
+    this.#awaitingHelloAck = false
+    if (this.#negotiationTimer) clearTimeout(this.#negotiationTimer)
+    let ack: HelloAck
+    try {
+      ack = HelloAck.parse(JSON.parse(decoder.decode(payload)))
+    } catch {
+      this.#rejectHelloAck?.(
+        new RpcClientError(
+          ErrorCode.Unavailable,
+          'handshake violation: first control frame was not a HelloAck',
+        ),
+      )
+      return
+    }
+    this.#resolveHelloAck?.(ack)
+  }
+
+  async #send<M extends MethodName>(
     method: M,
     params: ParamsOf<M>,
     onSuccess?: (result: ResultOf<M>) => void,
   ): Promise<ResultOf<M>> {
-    if (this.#closed) return Promise.reject(new Error('controller is closed'))
+    if (this.#closed) throw new Error('controller is closed')
+    // Gate on the handshake: no RPC before HelloAck, and reject with the negotiation
+    // failure (VERSION_INCOMPATIBLE / timeout) if it did not complete.
+    const outcome = await this.#negotiated
+    const cap = requiredCapability(method)
+    if (cap && !outcome.active.has(cap)) {
+      throw new RpcClientError(ErrorCode.Forbidden, `capability not negotiated: ${cap}`, {
+        capability: cap,
+      })
+    }
+    if (this.#closed) throw new Error('controller is closed')
     const parsed = METHODS[method].params.parse(params) as ParamsOf<M>
     const id = newRequestId()
     const request: RpcRequest = { id, method, params: parsed }
-    const promise = new Promise<ResultOf<M>>((resolve, reject) => {
+    return new Promise<ResultOf<M>>((resolve, reject) => {
       this.#pending.set(id, {
         method,
         resolve: resolve as (result: unknown) => void,
         reject,
         onSuccess: onSuccess as ((result: unknown) => void) | undefined,
       })
+      try {
+        this.#channel.send(controlFrame(encoder.encode(JSON.stringify(request))))
+      } catch (error) {
+        this.#pending.delete(id)
+        reject(asError(error))
+      }
     })
-    try {
-      this.#channel.send(controlFrame(encoder.encode(JSON.stringify(request))))
-    } catch (error) {
-      this.#pending.delete(id)
-      return Promise.reject(asError(error))
-    }
-    return promise
   }
 
   #onFrame(frame: ChannelFrame): void {
@@ -190,6 +337,11 @@ export class Controller {
   }
 
   #onControl(payload: Uint8Array): void {
+    // Before negotiation completes, the first inbound control frame is the HelloAck.
+    if (this.#awaitingHelloAck) {
+      this.#handleHelloAck(payload)
+      return
+    }
     let response: ResponseFrame
     try {
       response = ResponseFrame.parse(JSON.parse(decoder.decode(payload)))
@@ -228,6 +380,12 @@ export class Controller {
     if (this.#closed) return
     this.#closed = true
     const reason = error ?? new Error('secure channel closed')
+    // A close mid-handshake fails the negotiation closed (rejects every request).
+    if (this.#negotiationTimer) clearTimeout(this.#negotiationTimer)
+    if (this.#awaitingHelloAck) {
+      this.#awaitingHelloAck = false
+      this.#rejectHelloAck?.(reason)
+    }
     for (const pending of this.#pending.values()) pending.reject(reason)
     this.#pending.clear()
     for (const stream of this.#streamsById.values()) stream.end()

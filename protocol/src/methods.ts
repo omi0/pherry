@@ -1,4 +1,12 @@
 import { z } from 'zod'
+import {
+  ATTENTION,
+  type KnownCapability,
+  PTY_STREAM,
+  SANDBOX,
+  SESSION_APPROVE,
+  SESSION_INPUT,
+} from './capabilities.js'
 import { AttentionEvent } from './schemas/attention.js'
 import { CustodyClaim, CustodyReservation, CustodySpec, SessionList } from './schemas/custody.js'
 import { SessionRef, StreamId } from './schemas/ids.js'
@@ -61,3 +69,39 @@ export type ParamsOf<M extends MethodName> = z.infer<(typeof METHODS)[M]['params
 
 /** The result type for method `M`. */
 export type ResultOf<M extends MethodName> = z.infer<(typeof METHODS)[M]['result']>
+
+/**
+ * The capability each method requires to be served — the canonical gate the
+ * handshake's negotiated set is checked against.
+ *
+ * This is **code metadata, not a wire type**: it never crosses the wire and never
+ * bumps the protocol version. A method listed here is a *feature* — a peer must
+ * have negotiated its capability (see `negotiate` / `negotiateHello`) for a host to
+ * serve it; a host refuses a de-negotiated feature **closed** with `FORBIDDEN`,
+ * which is deliberately distinct from `METHOD_NOT_FOUND` (an unknown / unserved
+ * method). A method **absent** from this map carries no capability: it is a
+ * lifecycle (`session.unsubscribe`), discovery (`sessions.list`), or
+ * host-configuration (`custody.*`) concern, always available subject to its own
+ * hooks, never a negotiated feature.
+ *
+ * The map is exhaustive over the *feature* methods regardless of whether any given
+ * host leg serves them today — it documents the gate a future host will enforce
+ * when it implements `session.approve` / `sandbox.spawn` / `attention.raise`.
+ */
+export const METHOD_CAPABILITY = {
+  'session.subscribe': PTY_STREAM,
+  'session.input': SESSION_INPUT,
+  'session.resize': SESSION_INPUT,
+  'session.approve': SESSION_APPROVE,
+  'sandbox.spawn': SANDBOX,
+  'attention.raise': ATTENTION,
+} as const satisfies Partial<Record<MethodName, KnownCapability>>
+
+/**
+ * The capability method `M` requires, or `undefined` when it carries none
+ * (lifecycle / discovery / host-config). A host gates a served method on this;
+ * `undefined` means "no capability gate" (the method's own hooks still apply).
+ */
+export function requiredCapability(method: MethodName): KnownCapability | undefined {
+  return (METHOD_CAPABILITY as Partial<Record<MethodName, KnownCapability>>)[method]
+}

@@ -6,13 +6,15 @@ import XCTest
 final class ControllerClientTests: XCTestCase {
     private let sessionRef = "sref_00000000000000000000000000000001"
 
-    private func makePair() async -> (ControllerClient, ScriptedHost) {
+    private func makePair(hostProtocol: Int = PherryProtocol.version) async -> (ControllerClient, ScriptedHost) {
         let (t1, t2) = MemoryTransport.pair()
         let host = X25519.generate()
         let initiator = SecureChannel(role: .initiator(pinnedHostStatic: host.publicKey), transport: t1, context: nil)
         let responder = SecureChannel(role: .responder(staticSecretKey: host.secret), transport: t2, context: nil)
         let client = ControllerClient(channel: initiator)
-        let scriptedHost = ScriptedHost(channel: responder, sessionRef: sessionRef)
+        let scriptedHost = ScriptedHost(
+            channel: responder, sessionRef: sessionRef, helloAckProtocol: hostProtocol
+        )
         return (client, scriptedHost)
     }
 
@@ -77,6 +79,19 @@ final class ControllerClientTests: XCTestCase {
         }
         await client.close()
     }
+
+    /// leg-M22: a host advertising an incompatible protocol version in its HelloAck makes
+    /// the client fail closed — every request rejects VERSION_INCOMPATIBLE, no RPC proceeds.
+    func testIncompatibleHostVersionFailsClosed() async throws {
+        let (client, _) = await makePair(hostProtocol: PherryProtocol.version + 1)
+        do {
+            _ = try await client.subscribe(sessionRef: sessionRef, cols: 80, rows: 24)
+            XCTFail("expected VERSION_INCOMPATIBLE")
+        } catch let error as RpcClientError {
+            XCTAssertEqual(error.code, "VERSION_INCOMPATIBLE")
+        }
+        await client.close()
+    }
 }
 
 /// A minimal scripted host over a responder ``SecureChannel``: it answers `sessions.list`,
@@ -85,13 +100,15 @@ final class ControllerClientTests: XCTestCase {
 final class ScriptedHost: @unchecked Sendable {
     private let channel: SecureChannel
     private let sessionRef: String
+    private let helloAckProtocol: Int
     private let streamId: UInt32 = 42
     private let lock = NSLock()
     private var requests: [(method: String, params: [String: Any])] = []
 
-    init(channel: SecureChannel, sessionRef: String) {
+    init(channel: SecureChannel, sessionRef: String, helloAckProtocol: Int = PherryProtocol.version) {
         self.channel = channel
         self.sessionRef = sessionRef
+        self.helloAckProtocol = helloAckProtocol
         Task { await self.run() }
     }
 
@@ -120,10 +137,18 @@ final class ScriptedHost: @unchecked Sendable {
     private func handle(_ frame: ChannelFrame) async {
         guard
             frame.tag == .control,
-            let object = try? JSONSerialization.jsonObject(with: frame.payload) as? [String: Any],
-            let id = object["id"] as? String,
-            let method = object["method"] as? String
+            let object = try? JSONSerialization.jsonObject(with: frame.payload) as? [String: Any]
         else { return }
+        // The controller's opening Hello (leg-M22): answer HelloAck, then serve RPC.
+        if object["role"] is String {
+            await sendControl([
+                "protocol": helloAckProtocol,
+                "capabilities": PherryProtocol.controllerCapabilities,
+                "publicKey": "",
+            ])
+            return
+        }
+        guard let id = object["id"] as? String, let method = object["method"] as? String else { return }
         let params = object["params"] as? [String: Any] ?? [:]
         record(method, params)
 

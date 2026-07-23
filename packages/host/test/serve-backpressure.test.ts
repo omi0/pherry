@@ -22,6 +22,7 @@ import {
 } from '@pherry/protocol'
 import { describe, expect, it } from 'vitest'
 import { FakeBackend, Session, SessionRegistry, serveConnection } from '../src/index.js'
+import { controllerHello } from './hello.js'
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -93,12 +94,27 @@ function controllableLink() {
   }
 }
 
-/** A controller over `channel`: RPC by id, plus every inbound binary PTY frame. */
+/**
+ * A controller over `channel`: RPC by id, plus every inbound binary PTY frame. It
+ * completes the leg-M22 handshake first (Hello → consume HelloAck); the channel
+ * must be open when this is constructed.
+ */
 function controllerClient(channel: SecureChannel) {
   const ptyFrames: PtyFrame[] = []
   const pending = new Map<string, (reply: ResponseFrame) => void>()
+  let negotiated = false
+  let onNegotiated: () => void = () => {}
+  const ready = new Promise<void>((resolve) => {
+    onNegotiated = resolve
+  })
   channel.onFrame((frame) => {
     if (frame.tag === FrameTag.Control) {
+      if (!negotiated) {
+        // The first control frame is the host's HelloAck; consume it.
+        negotiated = true
+        onNegotiated()
+        return
+      }
       const reply = ResponseFrame.parse(JSON.parse(decoder.decode(frame.payload)))
       const resolve = pending.get(reply.id)
       if (resolve) {
@@ -110,8 +126,10 @@ function controllerClient(channel: SecureChannel) {
     const decoded = decodePtyFrame(frame.payload)
     if (decoded) ptyFrames.push(decoded)
   })
+  channel.send(controllerHello())
   let seq = 0
   return {
+    ready,
     ptyFrames,
     outputs: () =>
       ptyFrames.filter((f) => f.opcode === PtyOpcode.Output).map((f) => dec(f.payload)),
@@ -143,7 +161,9 @@ async function setup() {
     pinnedHostStatic: hostKey.publicKey,
   })
   await initiator.ready()
-  return { backend, handle, session, link, client: controllerClient(initiator) }
+  const client = controllerClient(initiator)
+  await client.ready
+  return { backend, handle, session, link, client }
 }
 
 describe('serveConnection backpressure (end to end over a real channel)', () => {
@@ -198,7 +218,9 @@ describe('serveConnection backpressure (end to end over a real channel)', () => 
         pinnedHostStatic: hostKey.publicKey,
       })
       await initiator.ready()
-      return controllerClient(initiator)
+      const client = controllerClient(initiator)
+      await client.ready
+      return client
     }
 
     const slowLink = controllableLink()
