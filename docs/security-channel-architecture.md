@@ -208,6 +208,9 @@ attacker who also passes Face ID," and the audit log records a human, not just a
 
 ## 4. Sequencing
 
+Implementation-level spec for S1–S4 — exact shapes, file-scoped mandates, migrations, test plans:
+[`security-channel-implementation.md`](./security-channel-implementation.md).
+
 Each leg is independently shippable and green-gated; the house pattern is a `docs:` spec commit, then the
 `feat:`/`fix:` commit.
 
