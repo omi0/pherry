@@ -181,6 +181,15 @@ are not re-opened; see `securityfindings.md` for the full reasoning.
   `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`), and L12 (end the placeholder CallKit call on a
   malformed VoIP payload) are Swift-side changes for a future iOS pass, gated by `swift test` +
   the simulator build.
+  **Status: DONE (2026-07-25).** M24 — a new app-side `PairPolicy` (PherryKit stays frozen):
+  api URLs must be https (http only to loopback, the simulator dev loop); a seeded deep link
+  never auto-redeems; a new api origin or a host-key re-pin stops at a confirm card; the redeem
+  itself refuses a control plane echoing a different host id and an unconfirmed re-pin. L11 —
+  `ThisDeviceOnly` accessibility (background PushKit reads unaffected; existing items migrate on
+  next write). L12 — a malformed VoIP payload reports (the iron rule) then ends immediately with
+  `.failed` and never enters `activeCalls`. Gate: PherryKit 41 ✓, app unit bundle 36 ✓ (11 new
+  `PairPolicyTests`), unsigned simulator build ✓. On-device re-verification of the VoIP wake
+  under the new keychain class is the one residual manual check.
 
 ---
 
@@ -197,6 +206,8 @@ externally / a separate gate:
    encrypt the outer protocol, or add a data-leg challenge-response (extra round-trip). Denial-only
    today, so low priority.
 3. **L5** — commission the independent `@pherry/channel` audit before a hosted relay serves real users.
-4. **iOS pass** — M24 / L11 / L12 behind the Swift gate (`swift test` + simulator build).
+4. ~~**iOS pass** — M24 / L11 / L12 behind the Swift gate (`swift test` + simulator build).~~
+   **Done** — see the Status line in §3; re-verify the VoIP wake on a real device (L11's
+   keychain class change) when one is next provisioned.
 5. **Merge** — `security/deferred-fixes` is unpushed; review the six commits and merge when ready.
    H2 is a host↔cell **wire change**: roll the relay cell and CLI host daemon together.

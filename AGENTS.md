@@ -85,8 +85,8 @@ does not honor nested `.gitignore`s), and the JS verify gate is untouched by it.
 
 **Done, green, pushed** — 10 workspace projects, 774 tests: `protocol` (97) · `host` (59) · `channel`
 (71, audited) · `relay-core` (42) · `sdk` (5) · `transport-node` (6) · `cli` (142) · `control-plane`
-(287) · `relay` (20) · `dashboard` (45); plus, outside the workspace, `ios/` — `PherryKit` (39 Swift
-tests, conformance-vector-proven against the TS wire) and the app's unit bundle (25). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
+(287) · `relay` (20) · `dashboard` (45); plus, outside the workspace, `ios/` — `PherryKit` (41 Swift
+tests, conformance-vector-proven against the TS wire) and the app's unit bundle (36). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
 repo, then typing `gemini` (or `claude`/`codex`/…) is intercepted by a PATH shim → the persistent
 `pherry serve` daemon takes custody → the agent's TUI opens in your terminal while a second viewer
 (`pherry attach`) mirrors the same host-owned session.
