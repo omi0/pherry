@@ -126,16 +126,25 @@ docker build -f apps/relay/Dockerfile          -t pherry-relay .
 docker run --rm -p 3000:3000 \
   -e DATABASE_URL=postgres://pherry:pherry@host.docker.internal:5334/pherry \
   -e REDIS_URL=redis://host.docker.internal:6379 \
-  -e INTERNAL_API_KEY=dev-internal-key \
+  -e INTERNAL_API_KEY=dev-internal-key-00000000000000000000 \
   -e DIRECTOR_URL=tcp://127.0.0.1:9443 \
   pherry-control-plane
 
 docker run --rm -p 9443:9443 \
   -e CELL_ID=cell-local \
   -e CONTROL_PLANE_URL=http://host.docker.internal:3000 \
-  -e INTERNAL_API_KEY=dev-internal-key \
+  -e INTERNAL_API_KEY=dev-internal-key-00000000000000000000 \
   pherry-relay
 ```
+
+The images run `NODE_ENV=production`, so the shared `INTERNAL_API_KEY` must be **≥32 chars**
+(the control plane refuses to boot otherwise) — hence the padded dev value above. This
+containerized pair also keeps the **single-listener** topology (`INTERNAL_LISTEN_PORT` unset:
+internal routes on the public app, key-only) because a loopback-bound private listener inside
+one container is unreachable from the other; when isolating containerized deploys, bind
+`INTERNAL_LISTEN_HOST` to the private docker-network interface instead (see
+[`deploying.md`](./deploying.md) § Isolating the internal API). The host-run dev stack
+(`make up`, the `.env`s) does use the private listener — `127.0.0.1:3001`.
 
 Inside a container, `localhost` is the container — reach host-published services via
 `host.docker.internal`. To run both images talking to each other, put them on one

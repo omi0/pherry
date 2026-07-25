@@ -202,6 +202,10 @@ externally / a separate gate:
 1. **H7 deploy step** — set `INTERNAL_LISTEN_PORT`/`INTERNAL_LISTEN_HOST` (or platform private
    networking / mTLS) in the real deployment so `/internal/relay/*` leaves the public edge. The code
    now enables and documents this; infra must adopt it.
+   **Update (2026-07-25):** the dev stack + both `.env.example`s now run the private-listener
+   topology by default (`127.0.0.1:3001`, relay's `CONTROL_PLANE_URL` pointed at it), verified
+   live (route 404 on :3000, served + key-gated on :3001, loopback-bound). The step remains
+   open only for whatever **real** deployment comes later — no production infra exists yet.
 2. **H2 full closure (optional)** — only if the documented active-MITM race-window residual must go:
    encrypt the outer protocol, or add a data-leg challenge-response (extra round-trip). Denial-only
    today, so low priority.
