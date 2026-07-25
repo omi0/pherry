@@ -13,6 +13,8 @@ enum HostConnectionError: LocalizedError, Equatable {
     case offline(String)
     /// This device's token was revoked (unpaired server-side).
     case revoked
+    /// The control plane's host key disagrees with the one pinned at pair time (S1).
+    case keyMismatch
 
     var errorDescription: String? {
         switch self {
@@ -26,6 +28,8 @@ enum HostConnectionError: LocalizedError, Equatable {
             message
         case .revoked:
             "This device was unpaired. Pair again to reconnect."
+        case .keyMismatch:
+            "This host's identity key doesn't match the one you paired with. Refusing to connect — re-dock the host if it really was re-keyed."
         }
     }
 }
@@ -52,14 +56,16 @@ struct HostConnection: Sendable {
 
     /// Reach `hostId` through the relay and list its sessions.
     ///
-    /// `pinnedHostStatic` is the pair-time key when the host is docked here (the stronger pin);
-    /// when it is `nil` (an event from an unpaired org host) the pin falls back to the ticket's
-    /// API-returned key — trust-on-ticket, exactly like `attach --host`.
+    /// `pinnedHostStatic` is the **pair-time** key — the one this phone scanned from the host's own
+    /// QR — and it is required. There is deliberately no fallback to the ticket's API-returned key:
+    /// letting the control plane supply the pin would let it hand us a key it holds the private half
+    /// of, making it a full man-in-the-middle on content, which is exactly what the E2EE channel
+    /// exists to prevent (S1). A host this phone has not docked is not reachable; dock it first.
     static func connect(
         apiUrl: URL,
         deviceToken: String,
         hostId: String,
-        pinnedHostStatic: Data?
+        pinnedHostStatic: Data
     ) async throws -> HostConnection {
         let client = ControlPlaneClient(apiUrl: apiUrl)
 
@@ -71,6 +77,14 @@ struct HostConnection: Sendable {
             throw mapTicketError(error)
         }
         guard let cellUrl = ticket.cellUrl else { throw HostConnectionError.noRelay }
+
+        // 1b. The control plane's copy of the host key must agree with what this phone pinned at
+        //     pair time. A disagreement means the host re-keyed or something is impersonating it,
+        //     and the two are indistinguishable from here — so refuse now, before a single byte is
+        //     sent to the relay, rather than dial and let the channel fail closed later.
+        guard ticket.hostPublicKey == pinnedHostStatic else {
+            throw HostConnectionError.keyMismatch
+        }
 
         // 2. Resolve + dial the blind cell.
         let host: String
@@ -95,10 +109,9 @@ struct HostConnection: Sendable {
             throw mapRelayError(error)
         }
 
-        // 4. Layer the pinned, context-bound initiator channel.
-        let pin = pinnedHostStatic ?? ticket.hostPublicKey
+        // 4. Layer the pinned, context-bound initiator channel — always on the pair-time key.
         let channel = SecureChannel(
-            role: .initiator(pinnedHostStatic: pin),
+            role: .initiator(pinnedHostStatic: pinnedHostStatic),
             transport: raw,
             context: RelayContext.channelContext(hostId: hostId, ticket: ticket.ticket)
         )

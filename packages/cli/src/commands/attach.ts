@@ -48,7 +48,14 @@ import { ControlPlaneClient } from '../control-plane-client.js'
 import { connectDaemon } from '../daemon/client.js'
 import { readDockConfig } from '../dock-config.js'
 import { readHostPublicKey } from '../host-key.js'
+import {
+  fingerprintOfB64,
+  knownHostEntry,
+  lookupKnownHost,
+  writeKnownHost,
+} from '../known-hosts.js'
 import { hostSocketPath, latestSocket, sessionRefFromSocket } from '../paths.js'
+import { type PromptIo, confirm, isInteractive } from '../prompt.js'
 import {
   type TerminalClientResult,
   type TerminalIo,
@@ -84,6 +91,8 @@ export interface AttachOptions {
   connectCell?: (cellUrl: string) => Duplex | Promise<Duplex>
   /** The relay flow's fail-closed deadline, ms (tests). Defaults to {@link DEFAULT_AUTH_TIMEOUT_MS}. */
   authTimeoutMs?: number
+  /** Streams for the first-use trust prompt (tests). Defaults to the process TTY. */
+  promptIo?: PromptIo
 }
 
 /**
@@ -174,10 +183,13 @@ async function attachDaemonSession(
  * ticket)` — over the bridged duplex. From there the flow is identical to the
  * local ones: the same `Controller` and {@link runTerminalClient}.
  *
- * The pin comes from the control plane's response, **not** the local host key: the
- * host is in general a different machine. The context binding makes a mis-spliced
- * bridge fail closed. Because that failure is silent at the transport, the whole
- * reach is raced against {@link authDeadline} so it rejects rather than hangs.
+ * The pin comes from this machine's **known-hosts file**, never from the control
+ * plane's response (see {@link resolveRemotePin}): the host is in general a
+ * different machine, but letting the API choose what we pin would hand a party the
+ * threat model treats as hostile to content the power to hand us its own key. The
+ * context binding makes a mis-spliced bridge fail closed. Because that failure is
+ * silent at the transport, the whole reach is raced against {@link authDeadline} so
+ * it rejects rather than hangs.
  */
 async function attachRemoteHost(
   host: string,
@@ -201,17 +213,29 @@ async function attachRemoteHost(
     apiUrl,
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
   })
-  const { ticket, cellUrl, hostPublicKeyB64 } = await client.relayTicket(token, host)
-  if (!cellUrl) {
+  let minted = await client.relayTicket(token, host)
+  if (!minted.cellUrl) {
     throw new Error('the control plane has no relay configured — cannot reach the host')
   }
+
+  // Establish the pin BEFORE dialing. A first-use confirmation can take longer than
+  // a ticket's short TTL, so re-mint after any prompt rather than burn the reach on
+  // an expired ticket.
+  const pin = await resolveRemotePin(host, minted.hostPublicKeyB64, options)
+  if (pin.prompted) {
+    minted = await client.relayTicket(token, host)
+    if (!minted.cellUrl) {
+      throw new Error('the control plane has no relay configured — cannot reach the host')
+    }
+  }
+  const { ticket, cellUrl } = minted
 
   const dial = options.connectCell ?? connectCell
   const duplex = await connectViaCell({ connect: () => dial(cellUrl), ticket })
   const channel = new SecureChannel({
     role: 'initiator',
     duplex,
-    pinnedHostStatic: decodeKey(hostPublicKeyB64),
+    pinnedHostStatic: pin.key,
     context: relayChannelContext(host, ticket),
   })
   const controller = new Controller(channel)
@@ -237,6 +261,82 @@ async function attachRemoteHost(
     ])
   } finally {
     controller.close()
+  }
+}
+
+/** A resolved remote pin, and whether establishing it required asking the user. */
+interface ResolvedPin {
+  /** The 32-byte static public key to pin the channel to. */
+  key: Uint8Array
+  /** Whether a first-use confirmation ran (so the caller re-mints its ticket). */
+  prompted: boolean
+}
+
+/**
+ * Decide what static key to pin for a remote host — the trust decision `--host`
+ * turns on, kept out of the dial path so it is readable on its own.
+ *
+ * `apiKeyB64` is what the control plane returned with the ticket. It is **never**
+ * the authority; it is only compared against, or offered for a first-use decision:
+ *
+ * - **Known and matching** — pin the local record. The common path, silent.
+ * - **Known and different** — refuse, hard and loudly. This is either the host's
+ *   key legitimately rotating or a control plane substituting one, and the two are
+ *   indistinguishable from here, so it is never a prompt. `pherry hosts trust`
+ *   is the deliberate override.
+ * - **Unknown** — trust on first use, but only from an interactive terminal and
+ *   only after the human sees the fingerprint. A non-TTY refuses with the exact
+ *   command to run, because a pipe cannot consent.
+ */
+async function resolveRemotePin(
+  hostId: string,
+  apiKeyB64: string,
+  options: AttachOptions,
+): Promise<ResolvedPin> {
+  const known = await lookupKnownHost(hostId, options.baseDir)
+
+  if (known) {
+    if (known.staticPublicKeyB64 !== apiKeyB64) {
+      throw new Error(
+        `host key mismatch for ${hostId} — REFUSING TO CONNECT.
+  pinned here: ${fingerprintOfB64(known.staticPublicKeyB64)}
+  control plane says: ${safeFingerprint(apiKeyB64)}
+Either that host re-keyed, or something is impersonating it. If you are certain it re-keyed,
+run \`pherry hosts trust ${hostId} --key <base64>\` with a key you obtained out of band.`,
+      )
+    }
+    return { key: decodeKey(known.staticPublicKeyB64), prompted: false }
+  }
+
+  // First use. The offered key came from the control plane, so the human — not the
+  // API — makes the call, and from here on it is pinned and a change is fatal.
+  const promptIo = options.promptIo
+  if (!isInteractive(promptIo)) {
+    throw new Error(
+      `unknown host ${hostId} — no pinned key on this machine, and this is not an interactive terminal.
+Trust it explicitly first: \`pherry hosts trust ${hostId} --key <base64>\``,
+    )
+  }
+  const accepted = await confirm(
+    `Host ${hostId} is not known on this machine.
+  fingerprint: ${safeFingerprint(apiKeyB64)}
+Trust and remember this key?`,
+    promptIo,
+  )
+  if (!accepted) {
+    throw new Error(`refused the host key for ${hostId} — not connecting`)
+  }
+  const key = decodeKey(apiKeyB64)
+  await writeKnownHost(knownHostEntry(hostId, key, 'trusted on first use'), options.baseDir)
+  return { key, prompted: true }
+}
+
+/** A fingerprint for display that never throws on a malformed key from the wire. */
+function safeFingerprint(publicKeyB64: string): string {
+  try {
+    return fingerprintOfB64(publicKeyB64)
+  } catch {
+    return '<unreadable key>'
   }
 }
 

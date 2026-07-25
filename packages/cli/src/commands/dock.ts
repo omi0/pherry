@@ -29,6 +29,7 @@ import { ControlPlaneClient, ControlPlaneError, resolveApiUrl } from '../control
 import { livePid } from '../daemon/pidfile.js'
 import { type DockConfig, dockConfigPath, readDockConfig, writeDockConfig } from '../dock-config.js'
 import { defaultHostKeyDir, loadOrCreateHostKey, publicKeyPath } from '../host-key.js'
+import { knownHostEntry, writeKnownHost } from '../known-hosts.js'
 import { configPath } from '../paths.js'
 import { renderQrTerminal } from '../qr.js'
 
@@ -135,6 +136,14 @@ export async function runDock(options: DockOptions = {}): Promise<DockResult> {
     baseDir,
     step,
   })
+
+  // 3b. Pin this machine's own host key in known-hosts, so a later
+  // `attach --host <this host>` from here has a first-party anchor and never has
+  // to trust the control plane's copy of the key it just uploaded.
+  await writeKnownHost(
+    knownHostEntry(registration.hostId, keyPair.publicKey, 'this machine (pherry dock)'),
+    baseDir,
+  )
 
   // 4. Daemon — reuse leg-3c's ensure logic verbatim.
   const daemon = await ensureDaemon(options)

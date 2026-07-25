@@ -40,7 +40,18 @@ serialized into an error, never sent anywhere. Public keys and fingerprints are 
 
 ---
 
-## S1 — First-party pin provenance *(closes A1)*
+## S1 — First-party pin provenance *(closes A1)* — **DONE**
+
+> **Status: shipped.** CLI: `known-hosts.ts` (`~/.pherry/known_hosts.json`, 0600) + `prompt.ts`
+> (`confirm`, default-no, EOF-safe) + `pherry hosts list|trust|forget`; `attach --host` resolves the
+> pin locally, refuses a control-plane contradiction **before dialing**, TOFU-prompts only on a TTY,
+> and re-mints the ticket after a prompt so the confirmation cannot outlive it; `dock` seeds this
+> machine's own host. iOS: `HostConnection.connect` takes a **non-optional** pin (the fallback cannot
+> be reintroduced without a compile error), plus a pre-dial `keyMismatch` refusal and a "dock it
+> first" state on `TerminalScreen`. Gate: 945 JS tests (CLI 187, +23 new), PherryKit 41, app bundle
+> 39, unsigned simulator build. One defect found and fixed while building: `readline`'s `question`
+> never settles on EOF, so the first `confirm` would have **hung** a non-interactive ceremony instead
+> of refusing it.
 
 ### Goal
 A controller **never** accepts a host static key from the control plane. Today `attach --host` always

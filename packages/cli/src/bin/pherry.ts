@@ -26,6 +26,7 @@ import {
 } from '../commands/attention.js'
 import { runAnchor, runBoard, runUnboard } from '../commands/board.js'
 import { runDock } from '../commands/dock.js'
+import { runHostsForget, runHostsList, runHostsTrust } from '../commands/hosts.js'
 import { runOpen } from '../commands/open.js'
 import { startRun } from '../commands/run.js'
 import { startServe, stopServe } from '../commands/serve.js'
@@ -43,6 +44,8 @@ Usage:
   pherry anchor [<repo>]            soft brake: stop custodying new launches here
   pherry unboard [<repo>]           remove the shims / custody entirely
   pherry sessions                   list the daemon's live sessions
+  pherry hosts list | trust <id> --key <b64> | forget <id>
+                                    the host keys this machine trusts for a remote attach
   pherry attention raise --kind <k> --summary <text> [--session <ref>]
                                     tell your operator a session needs a human
   pherry attention list | watch | ack <id>
@@ -79,6 +82,8 @@ async function main(argv: string[]): Promise<number> {
       return unboardCommand(rest)
     case 'sessions':
       return sessionsCommand()
+    case 'hosts':
+      return hostsCommand(rest)
     case 'attention':
       return attentionCommand(rest)
     case 'serve':
@@ -231,6 +236,62 @@ async function sessionsCommand(): Promise<number> {
     )
   }
   return 0
+}
+
+/** Per-verb help for `pherry hosts`, printed for an unknown or missing subcommand. */
+const HOSTS_USAGE = `pherry hosts — the host keys this machine trusts for \`attach --host\`
+
+Usage:
+  pherry hosts list                          show every pinned host + its fingerprint
+  pherry hosts trust <hostId> --key <b64> [--label <text>]
+                                             pin a key you obtained out of band
+  pherry hosts forget <hostId>               drop a pin
+
+A remote attach pins from this file, never from the control plane. A host whose key
+no longer matches its pin is refused outright — \`trust\` is the deliberate override.`
+
+/** `pherry hosts …` — inspect and edit the known-hosts pins. */
+async function hostsCommand(argv: string[]): Promise<number> {
+  const [subcommand, ...rest] = argv
+  const write = (line: string): void => {
+    process.stdout.write(`${line}\n`)
+  }
+
+  if (subcommand === 'list' || subcommand === undefined) {
+    await runHostsList({ ...baseDirOption(), onLine: write })
+    return 0
+  }
+
+  if (subcommand === 'trust') {
+    const { values, positionals } = parseArgs({
+      args: rest,
+      allowPositionals: true,
+      options: { key: { type: 'string' }, label: { type: 'string' } },
+    })
+    const hostId = positionals[0]
+    if (!hostId || !values.key) {
+      process.stderr.write(`${HOSTS_USAGE}\n`)
+      return 2
+    }
+    await runHostsTrust(hostId, values.key, {
+      ...baseDirOption(),
+      ...(values.label !== undefined ? { label: values.label } : {}),
+      onLine: write,
+    })
+    return 0
+  }
+
+  if (subcommand === 'forget') {
+    const hostId = rest[0]
+    if (!hostId) {
+      process.stderr.write(`${HOSTS_USAGE}\n`)
+      return 2
+    }
+    return (await runHostsForget(hostId, { ...baseDirOption(), onLine: write })) ? 0 : 1
+  }
+
+  process.stderr.write(`${HOSTS_USAGE}\n`)
+  return 2
 }
 
 /** Per-verb help for `pherry attention`, printed when no subcommand + no --summary. */

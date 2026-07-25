@@ -47,12 +47,19 @@ final class TerminalSession {
             phase = .dropped("This device isn't paired.")
             return
         }
+        // The pair-time key is the only acceptable pin (S1). A target this phone has never docked
+        // — an attention event for an org host paired on someone else's device — has no pin here,
+        // and there is deliberately no fallback to the control plane's copy: dock it first.
+        guard let pin = model.pinnedKey(for: target.hostId) else {
+            phase = .dropped("This host isn't docked on this phone yet. Pair it to open its sessions.")
+            return
+        }
         do {
             let connection = try await HostConnection.connect(
                 apiUrl: apiUrl,
                 deviceToken: token,
                 hostId: target.hostId,
-                pinnedHostStatic: model.pinnedKey(for: target.hostId)
+                pinnedHostStatic: pin
             )
             self.connection = connection
             let (cols, rows) = terminal.size

@@ -27,6 +27,23 @@ export {
 // Local run/attach socket layout.
 export { latestSocket, runDir, sessionRefFromSocket, socketPathFor } from './paths.js'
 
+// S1 — where a remote pin comes from: this machine's known-hosts file, and the
+// one-question confirm the first-use ceremony asks.
+export {
+  type KnownHost,
+  fingerprintOfB64,
+  forgetKnownHost,
+  keyFingerprint,
+  knownHostEntry,
+  knownHostsPath,
+  lookupKnownHost,
+  readKnownHosts,
+  writeKnownHost,
+} from './known-hosts.js'
+export { type PromptIo, confirm, isInteractive, processPromptIo } from './prompt.js'
+export { runHostsForget, runHostsList, runHostsTrust } from './commands/hosts.js'
+export type { HostsOptions } from './commands/hosts.js'
+
 // The dev commands, as callable functions.
 export { resolveAgentArgv, startRun } from './commands/run.js'
 export type { RunHandle, RunOptions } from './commands/run.js'
