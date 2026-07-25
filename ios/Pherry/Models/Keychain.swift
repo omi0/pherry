@@ -5,7 +5,7 @@ import Security
 ///
 /// WHY a protocol: the device credential and paired hosts are secrets that must survive relaunch
 /// *and* be readable from a background PushKit wake, so production uses the Keychain
-/// (`kSecAttrAccessibleAfterFirstUnlock`). But a test must never touch the real Keychain, so
+/// (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`). But a test must never touch the real Keychain, so
 /// `AppModel` and the credential store depend on this protocol and the unit tests inject an
 /// in-memory double. The surface is deliberately three synchronous methods — `SecItem` is
 /// thread-safe and synchronous, so there is nothing to make async.
@@ -21,8 +21,10 @@ protocol KeychainStore: Sendable {
 /// The production ``KeychainStore`` over `SecItem`.
 ///
 /// Items are stored as generic passwords scoped to one service, accessible **after first unlock**
-/// so a VoIP push that wakes the app before the user unlocks can still read the device token.
-/// Nothing here is ever logged — the values are bearer tokens.
+/// so a VoIP push that wakes the app before the user unlocks can still read the device token —
+/// and **this-device-only**, so the bearer tokens never migrate through a device backup or
+/// transfer (background readability is unaffected; L11). Nothing here is ever logged — the
+/// values are bearer tokens.
 struct SystemKeychain: KeychainStore {
     /// The keychain service namespace (kept distinct from the bundle id so a rename is harmless).
     let service = "dev.pherry.app.keychain"
@@ -49,7 +51,7 @@ struct SystemKeychain: KeychainStore {
         // Update if present, else add — either way the item lands with the same accessibility.
         let attributes: [String: Any] = [
             kSecValueData as String: value,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
         let status = SecItemUpdate(base as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {

@@ -98,10 +98,20 @@ final class AppModel {
     // MARK: - Pairing
 
     /// Redeem a pair link against `apiUrl`: store the credential + host, then immediately register
-    /// for push so a fresh dock can ring right away. Throws on a failed redeem (surfaced by the UI).
-    func redeem(link: PairLink, apiUrl: URL, deviceName: String?) async throws {
+    /// for push so a fresh dock can ring right away. Throws on a failed redeem (surfaced by the UI)
+    /// and on a ``PairRefusal`` — an insecure api URL, a control plane echoing a host id the link
+    /// never named, or a key re-pin the user has not confirmed (`allowRepin`).
+    func redeem(link: PairLink, apiUrl: URL, deviceName: String?, allowRepin: Bool = false) async throws {
+        guard PairPolicy.allowsApiUrl(apiUrl) else { throw PairRefusal.insecureApiUrl }
         let client = ControlPlaneClient(apiUrl: apiUrl)
         let result = try await client.redeemPair(pairToken: link.pairToken, deviceName: deviceName)
+        // The scanned link is the trust ceremony: the control plane may only confirm the host the
+        // user scanned, never substitute another (which would re-pin that host's key below).
+        guard result.hostId == link.hostId else { throw PairRefusal.hostMismatch }
+        if let existing = hosts.first(where: { $0.id == result.hostId }),
+           existing.staticPublicKey != link.hostStaticPublicKey, !allowRepin {
+            throw PairRefusal.repinRefused
+        }
 
         if self.apiUrl == nil { self.apiUrl = apiUrl }
         if deviceToken == nil {

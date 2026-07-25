@@ -2,12 +2,15 @@ import PherryKit
 import SwiftUI
 
 /// The whole docking flow in one sheet: capture a `pherry://pair` link (scan or paste), fill in the
-/// control-plane address if the link and the app both lack one, redeem, and land on a success card.
+/// control-plane address if the link and the app both lack one, pass the ``PairPolicy`` trust gate,
+/// redeem, and land on a success card.
 ///
-/// WHY one view for both entry points: a deep link arrives seeded (`link != nil`) and jumps
-/// straight to redeem; the "+" / empty-state path arrives empty and shows the scanner. Converging
-/// them here means the redeem, the api-url fallback, and the success haptic are written once. On
-/// the Simulator (no camera) the paste field is the whole story — documented in running-locally §7.
+/// WHY one view for both entry points: a deep link arrives seeded (`link != nil`); the "+" /
+/// empty-state path arrives empty and shows the scanner. Converging them here means the redeem,
+/// the api-url fallback, the M24 confirm card, and the success haptic are written once. A seeded
+/// deep link **never** auto-redeems — it always stops at the confirm card, because the app was
+/// handed that URL unsolicited. On the Simulator (no camera) the paste field is the whole story —
+/// documented in running-locally §7.
 struct PairFlowView: View {
     /// A seeded link (deep link) or `nil` (start at capture).
     let link: PairLink?
@@ -23,6 +26,7 @@ struct PairFlowView: View {
     private enum Step: Equatable {
         case capture
         case needApi(PairLink)
+        case confirm(PairLink, URL, [PairPolicy.Warning])
         case redeeming
         case success(String)
         case failed(String)
@@ -51,6 +55,7 @@ struct PairFlowView: View {
         switch step {
         case .capture: captureStep
         case let .needApi(pending): apiStep(pending)
+        case let .confirm(pending, api, warnings): confirmStep(pending, api: api, warnings: warnings)
         case .redeeming: progressStep
         case let .success(name): successStep(name)
         case let .failed(message): failedStep(message)
@@ -130,14 +135,71 @@ struct PairFlowView: View {
                 .padding(12)
                 .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusSmall))
                 .overlay(RoundedRectangle(cornerRadius: Theme.radiusSmall).strokeBorder(Theme.border))
+            Text("https only — http works for localhost during development.")
+                .font(.footnote)
+                .foregroundStyle(Theme.muted)
             Button("Dock") {
-                guard let url = URL(string: apiText.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
-                redeem(pending, apiUrl: url)
+                guard let url = enteredApiUrl else { return }
+                confirmOrRedeem(pending, apiUrl: url)
             }
             .buttonStyle(PherryButtonStyle())
-            .disabled(URL(string: apiText.trimmingCharacters(in: .whitespacesAndNewlines)) == nil)
+            .disabled(enteredApiUrl == nil)
         }
         .padding(20)
+    }
+
+    /// The M24 confirm card — the user sees what they are about to trust before any redeem.
+    private func confirmStep(_ pending: PairLink, api: URL, warnings: [PairPolicy.Warning]) -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: "checkmark.shield")
+                .font(.system(size: 44, weight: .light))
+                .foregroundStyle(Theme.accent)
+            Text("Dock \(PairedHost.defaultName(for: pending.hostId))?")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Theme.text)
+            VStack(alignment: .leading, spacing: 8) {
+                confirmRow(label: "Host", value: pending.hostId)
+                confirmRow(label: "Control plane", value: PairPolicy.origin(of: api))
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusSmall))
+            .overlay(RoundedRectangle(cornerRadius: Theme.radiusSmall).strokeBorder(Theme.border))
+            ForEach(Array(warnings.enumerated()), id: \.offset) { _, warning in
+                warningRow(warning)
+            }
+            Button("Dock") {
+                redeem(pending, apiUrl: api, allowRepin: warnings.contains { warning in
+                    if case .repinsHostKey = warning { return true } else { return false }
+                })
+            }
+            .buttonStyle(PherryButtonStyle())
+            Button("Cancel") { step = .capture }
+                .font(.callout)
+                .foregroundStyle(Theme.muted)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func confirmRow(label: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label).font(.footnote).foregroundStyle(Theme.muted)
+            Text(value).font(.mono(13)).foregroundStyle(Theme.text)
+        }
+    }
+
+    private func warningRow(_ warning: PairPolicy.Warning) -> some View {
+        let (symbol, text, color): (String, String, Color) = switch warning {
+        case let .newApiOrigin(origin):
+            ("info.circle", "First time docking through \(origin) — make sure you expect this address.", Theme.muted)
+        case let .repinsHostKey(hostId):
+            ("exclamationmark.triangle.fill", "This replaces the pinned key for \(hostId). Only continue if you re-docked that host yourself.", Theme.danger)
+        }
+        return Label(text, systemImage: symbol)
+            .font(.footnote)
+            .foregroundStyle(color)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var progressStep: some View {
@@ -205,26 +267,66 @@ struct PairFlowView: View {
         begin(with: parsed)
     }
 
-    /// Decide whether we can redeem now or must ask for the api url first.
+    /// The manual api field's value, only when it passes the pair policy (https / loopback http).
+    private var enteredApiUrl: URL? {
+        guard let url = URL(string: apiText.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
+        return PairPolicy.allowsApiUrl(url) ? url : nil
+    }
+
+    /// Decide whether we can proceed now or must ask for the api url first.
     private func begin(with parsed: PairLink) {
         if let api = parsed.apiUrl ?? model.apiUrl {
-            redeem(parsed, apiUrl: api)
+            confirmOrRedeem(parsed, apiUrl: api)
         } else {
             step = .needApi(parsed)
         }
     }
 
-    private func redeem(_ parsed: PairLink, apiUrl: URL) {
+    /// The M24 gate. Redeem straight away only for an in-app capture against the known control
+    /// plane with nothing trust-bearing changing; a deep link (unsolicited — `link != nil`), a new
+    /// api origin, or a host-key re-pin stops at a confirm card first.
+    private func confirmOrRedeem(_ parsed: PairLink, apiUrl: URL) {
+        guard PairPolicy.allowsApiUrl(apiUrl) else {
+            step = .failed("This link points at an insecure control plane — https is required (http only for localhost).")
+            return
+        }
+        let warnings = PairPolicy.warnings(
+            link: parsed, apiUrl: apiUrl, storedApiUrl: model.apiUrl, hosts: model.hosts
+        )
+        if link != nil || !warnings.isEmpty {
+            step = .confirm(parsed, apiUrl, warnings)
+        } else {
+            redeem(parsed, apiUrl: apiUrl)
+        }
+    }
+
+    private func redeem(_ parsed: PairLink, apiUrl: URL, allowRepin: Bool = false) {
         step = .redeeming
         Task {
             do {
-                try await model.redeem(link: parsed, apiUrl: apiUrl, deviceName: UIDevice.current.name)
+                try await model.redeem(
+                    link: parsed, apiUrl: apiUrl, deviceName: UIDevice.current.name, allowRepin: allowRepin
+                )
                 Haptics.success()
                 step = .success(PairedHost.defaultName(for: parsed.hostId))
+            } catch let refusal as PairRefusal {
+                Haptics.warning()
+                step = .failed(Self.message(for: refusal))
             } catch {
                 Haptics.warning()
                 step = .failed("Docking failed — the link may be expired. Mint a fresh one with `pherry dock`.")
             }
+        }
+    }
+
+    private static func message(for refusal: PairRefusal) -> String {
+        switch refusal {
+        case .insecureApiUrl:
+            "This link points at an insecure control plane — https is required (http only for localhost)."
+        case .hostMismatch:
+            "The control plane answered for a different host than this link names. Refusing to dock."
+        case .repinRefused:
+            "This link would replace a docked host's pinned key. Un-dock the host first if you meant to."
         }
     }
 

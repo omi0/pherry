@@ -66,6 +66,20 @@ final class CallManager: NSObject, @unchecked Sendable {
         }
     }
 
+    /// The mandatory report for a malformed VoIP push: tell CallKit (the iron rule), then end the
+    /// call at once with `.failed`. The uuid never enters `activeCalls`, so no answer path exists.
+    private func reportFailedRing() {
+        let uuid = UUID()
+        let update = CXCallUpdate()
+        update.remoteHandle = CXHandle(type: .generic, value: "Pherry")
+        update.localizedCallerName = "Pherry"
+        update.hasVideo = false
+        provider.reportNewIncomingCall(with: uuid, update: update) { [provider] error in
+            guard error == nil else { return }
+            provider.reportCall(with: uuid, endedAt: Date(), reason: .failed)
+        }
+    }
+
     private func call(for uuid: UUID) -> IncomingCall? {
         lock.withLock { activeCalls[uuid] }
     }
@@ -121,11 +135,15 @@ extension CallManager: PKPushRegistryDelegate {
         completion: @escaping () -> Void
     ) {
         // The report MUST happen before we return. Parse the caller line from the push and report;
-        // a malformed push still reports a placeholder so we never risk termination.
+        // a malformed push still reports (or iOS kills the app) but is ended immediately with
+        // `.failed` and never enters `activeCalls` — garbage can flash, never ring, and an answer
+        // can never open a session without valid ids (L12).
         if type == .voIP {
-            let call = IncomingCall.parse(payload.dictionaryPayload)
-                ?? IncomingCall(eventId: "", hostId: "", hostName: "a host", sessionRef: "", summary: "", kind: "call")
-            reportCall(call)
+            if let call = IncomingCall.parse(payload.dictionaryPayload) {
+                reportCall(call)
+            } else {
+                reportFailedRing()
+            }
         }
         completion()
     }
