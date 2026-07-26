@@ -194,9 +194,12 @@ surfaced on the dashboard and phone, and document the residual honestly rather t
 
 Uncontroversial, all local to `packages/channel`: bound `ByteQueue` chunk count (M1 — coalesce once the
 length is known); wipe `dh_ee`/`dh_es`/`ikm` after derivation (M2); constant-time `recordTagEquals`
-(L1/L3). Plus: **make the H1 rule structural** — an initiator's `send()` throws until `authenticated()`
-resolves. Nothing in the tree sends before HelloAck today (§A4), so this is free to adopt and permanently
-forecloses the footgun.
+(L1/L3). Plus: **make the H1 rule structural** — an initiator's `send()` allows exactly **one** record
+(its negotiation frame) before `authenticated()` resolves, then throws until the first inbound record
+opens. That one-record budget is §A4 verbatim — post-M22 the controller speaks first, and its `Hello` is
+the sole legitimate pre-authentication emission — so the gate is free to adopt and permanently forecloses
+the footgun without deadlocking the negotiation. *(Corrected during S2: this line originally said
+"throws until `authenticated()` resolves", a pre-M22 premise — see the implementation spec's S2 §4.)*
 
 ### L5 — Presence-gated high-risk actions
 

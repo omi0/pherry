@@ -119,11 +119,19 @@ Local to `packages/channel`; no wire change, no iOS change.
    module's existing honest narrative. Test asserts the arrays are zeroed post-derive.
 3. **L1/L3 — constant-time `recordTagEquals`** in `record.ts`, reusing the `constantTimeEqual` idiom
    from `keys.ts`.
-4. **H1 made structural.** `SecureChannel.send()` throws for an **initiator** until `authenticated()`
-   has resolved. Nothing in the tree sends before HelloAck today (architecture §A4), so this is free.
-   Responders are unaffected — the host legitimately speaks first, and that ordering is what makes the
-   rule adoptable. Test: an initiator `send()` immediately after `ready()` throws; after
-   `authenticated()` succeeds.
+4. **H1 made structural.** An **initiator**'s `SecureChannel.send()` allows exactly **one** record
+   before `authenticated()` has resolved — its negotiation frame — and throws on every further send
+   until the first inbound record opens. Responders are unaffected: a responder legitimately answers
+   at once (and may speak first in a deployment without M22's negotiation).
+   **Amended while implementing (2026-07-26):** the original rule here — "throws until
+   `authenticated()`", justified by "the host speaks first" — was written against the pre-M22 flow.
+   Since M22 the **controller speaks first**: its `Hello` is the first record on the wire and is what
+   elicits the host's `HelloAck`, so a blanket gate would deadlock every connection. Architecture §A4
+   already states the truth precisely — "the sole pre-authentication emission is the controller's own
+   `Hello`" — and the one-record budget encodes exactly that: the negotiation frame goes out, and
+   nothing else can follow it until the peer has proven itself. Test: an initiator's **second** `send()`
+   after `ready()` (no inbound record yet) throws; after `authenticated()` it succeeds; a responder
+   sends multiple records pre-authentication unimpeded.
 5. **README correction (A3).** Scope "never even learns which host it is relaying for" to the channel
    layer, and state plainly that the *relay* knows `hostId` and fetches the host's static **public**
    key to verify registration.
