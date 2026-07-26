@@ -193,6 +193,10 @@ and the console loads (org "Dev"). Now the flows:
   **Ack** clears it (one-time — the CLI sees it gone too).
 - **Hosts / Sessions / Devices** — liveness dots track heartbeats; **Pair phone**
   renders the `pherry://` QR in a modal; revoked devices stop minting tickets.
+- **Log** (S4) — the org's append-only enrollment/authorization trail: host
+  registrations and revocations, pair mints, device pairings (and whether an
+  identity key was carried), device revocations, and every relay-ticket mint.
+  The host keeps its own local twin at `~/.pherry/audit.log` (`pherry devices log`).
 
 The dashboard reads `VITE_API_URL` (default `http://127.0.0.1:3000`) and
 `VITE_CLERK_PUBLISHABLE_KEY` (unset → the dev-token card; set → real Clerk

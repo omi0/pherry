@@ -10,6 +10,7 @@ import { eq } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { hosts } from '../db/schema.js'
+import { appendAuditEvent } from '../services/audit.js'
 import { checkRateLimit } from '../services/rate-limit.js'
 import { issueTicket } from '../services/relay-coordination.js'
 import { parseBody, requireDeviceOrHuman, sendError } from './http.js'
@@ -56,6 +57,16 @@ export async function relayRoutes(app: FastifyInstance): Promise<void> {
       host,
       org: { id: principal.orgId },
       principal: { kind: principal.kind, id: principal.id },
+    })
+    // S4 `ticket-minted` — the authorization event, awaited before the ticket is
+    // handed back so an unlogged authorization cannot succeed. Ids only; the
+    // ticket plaintext never lands in the log.
+    await appendAuditEvent(app.db, app.now(), {
+      orgId: principal.orgId,
+      kind: 'ticket-minted',
+      hostId: host.id,
+      ...(principal.kind === 'device' ? { deviceId: principal.id } : {}),
+      detail: { principal: principal.kind },
     })
     return TicketResponse.parse(result)
   })

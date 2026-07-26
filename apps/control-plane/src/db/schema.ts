@@ -183,6 +183,36 @@ export const attentionEvents = pgTable(
   ],
 )
 
+/**
+ * The **APPEND-ONLY** enrollment/authorization log (S4; also the P4 headless
+ * mitigation) — one row per trust-changing moment the control plane witnesses:
+ * `host-registered` / `host-revoked` / `pair-minted` / `device-paired` /
+ * `device-revoked` / `ticket-minted`. Every write is awaited in the request that
+ * performed the act (an unlogged authorization must not succeed), and there must
+ * be **no update or delete path anywhere in the codebase** — the log's whole
+ * value is that a later compromise cannot rewrite it. `detail` carries small
+ * structured facts (a display name, a boolean, a principal kind) — ids only,
+ * never a token plaintext or key material.
+ */
+export const auditEvents = pgTable(
+  'audit_events',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => orgs.id),
+    kind: text('kind').notNull(),
+    hostId: text('host_id'),
+    deviceId: text('device_id'),
+    detail: jsonb('detail').$type<Record<string, unknown>>(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // Newest-first listing per org (`GET /v1/audit`'s ordering).
+    index('audit_events_org_created_idx').on(table.orgId, table.createdAt),
+  ],
+)
+
 /** A selected `orgs` row. */
 export type Org = typeof orgs.$inferSelect
 /** A selected `users` row. */
@@ -197,3 +227,5 @@ export type PairToken = typeof pairTokens.$inferSelect
 export type SessionRow = typeof sessions.$inferSelect
 /** A selected `attention_events` row — the persisted shape a channel delivers. */
 export type AttentionEventRow = typeof attentionEvents.$inferSelect
+/** A selected `audit_events` row — one appended enrollment/authorization event. */
+export type AuditEventRow = typeof auditEvents.$inferSelect

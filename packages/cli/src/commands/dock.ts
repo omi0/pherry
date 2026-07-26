@@ -26,6 +26,7 @@ import type { AddressInfo } from 'node:net'
 import { hostname } from 'node:os'
 import { encodeKey } from '@pherry/channel'
 import { deviceFingerprint, deviceKeyIdOf } from '@pherry/protocol'
+import { appendAudit } from '../audit-log.js'
 import { ControlPlaneClient, ControlPlaneError, resolveApiUrl } from '../control-plane-client.js'
 import { livePid } from '../daemon/pidfile.js'
 import { loadOrCreateDeviceKey } from '../device-key.js'
@@ -160,6 +161,14 @@ export async function runDock(options: DockOptions = {}): Promise<DockResult> {
       publicKeyB64: Buffer.from(deviceKey.publicKey).toString('base64'),
       label: 'this machine (pherry dock)',
       enrolledAt: new Date().toISOString(),
+    },
+    baseDir,
+  )
+  await appendAudit(
+    {
+      kind: 'device-enrolled',
+      deviceKeyId: deviceKey.deviceKeyId,
+      detail: 'this machine (pherry dock)',
     },
     baseDir,
   )
@@ -312,6 +321,10 @@ export async function enrollDevice(options: EnrollDeviceOptions): Promise<Enroll
       label: name ?? 'device',
       enrolledAt: new Date().toISOString(),
     },
+    options.baseDir,
+  )
+  await appendAudit(
+    { kind: 'device-enrolled', deviceKeyId, detail: name ?? 'device' },
     options.baseDir,
   )
   step(`pherry: enrolled "${name ?? 'device'}" (${deviceKeyId}) — it can now steer this host`)

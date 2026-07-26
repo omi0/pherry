@@ -125,6 +125,22 @@ describe('createApi — request shaping', () => {
     expect(calls[0]?.url).toBe('https://cp.example.com/v1/attention?since=1234')
   })
 
+  it('listAudit → GET /v1/audit, unwrapping .events', async () => {
+    const event = {
+      id: 'aud_1',
+      kind: 'device-paired',
+      hostId: 'host_1',
+      deviceId: 'dev_1',
+      detail: { name: 'pixel', identityKey: true },
+      createdAt: '2026-07-26T12:00:00.000Z',
+    }
+    const { api, calls } = makeApi(jsonResponse({ events: [event] }))
+    const events = await api.listAudit()
+    expect(events).toEqual([event])
+    expect(calls[0]?.method).toBe('GET')
+    expect(calls[0]?.url).toBe('https://cp.example.com/v1/audit')
+  })
+
   it('ackAttention → POST /v1/attention/:id/ack', async () => {
     const { api, calls } = makeApi(jsonResponse({ ok: true }))
     await api.ackAttention('att_9')

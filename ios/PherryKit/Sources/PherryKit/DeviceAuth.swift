@@ -87,6 +87,12 @@ public enum DeviceAuth {
 /// The seam through which a controller signs its device-auth statement — implemented by the
 /// key's owner (the app's Secure Enclave identity in production, a software P-256 double in
 /// unit tests: no Secure Enclave in CI, the same discipline as every other external seam).
+///
+/// **Failure contract (S4).** `sign(message:)` may throw — for a presence-gated enclave key a
+/// biometric cancel or failure surfaces here. A throw fails the negotiation **closed**: the
+/// `Hello` is never sent (no half-made claim reaches the wire), every pending and subsequent
+/// RPC on that client rejects, and there is no bypass or cached-approval path — a retry is a
+/// fresh connection, which prompts again.
 public protocol DeviceSigner: Sendable {
     /// The signing key's id — the first 16 lowercase hex chars of SHA-256(public key),
     /// carried verbatim as `Hello.deviceKeyId` and bound into the signed statement.

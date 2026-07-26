@@ -69,6 +69,20 @@ export interface AttentionRecord {
   readonly createdAt: number
 }
 
+/**
+ * One enrollment/authorization log event from `GET /v1/audit` (S4), newest first.
+ * `detail` is a small structured bag (a display name, a boolean, a principal
+ * kind) — the control plane never puts secrets in it.
+ */
+export interface AuditEvent {
+  readonly id: string
+  readonly kind: string
+  readonly hostId: string | null
+  readonly deviceId: string | null
+  readonly detail: Record<string, unknown> | null
+  readonly createdAt: string
+}
+
 /** `POST /v1/cli/auth/approve` success — the loopback redirect, or `null` (headless). */
 export interface CliAuthApproval {
   readonly ok: true
@@ -125,6 +139,8 @@ export interface DashboardApi {
   revokeDevice(deviceId: string): Promise<void>
   /** List pending attention events, optionally only those after a `since` cursor. */
   listAttention(opts?: { since?: number }): Promise<AttentionRecord[]>
+  /** List the org's enrollment/authorization log (S4), newest first. */
+  listAudit(): Promise<AuditEvent[]>
   /** Acknowledge (clear) one attention event; a second ack is a tolerated `404`. */
   ackAttention(id: string): Promise<void>
   /** Describe a pending CLI-auth request (whether it needs a user code). */
@@ -185,6 +201,7 @@ export function createApi(opts: CreateApiOptions): DashboardApi {
       const path = query ? `/v1/attention?${query}` : '/v1/attention'
       return (await request<{ events: AttentionRecord[] }>('GET', path)).events
     },
+    listAudit: async () => (await request<{ events: AuditEvent[] }>('GET', '/v1/audit')).events,
     ackAttention: async (id) => {
       await request('POST', `/v1/attention/${encodeURIComponent(id)}/ack`)
     },

@@ -1,8 +1,8 @@
 /**
  * The **console shell** — the signed-in surface at `/`. A header (org name from
- * `/v1/me`, the auth-mode badge, sign-out) over four sections: Attention (default),
- * Hosts, Sessions, Devices. A `401` from `/v1/me` (a valid-shaped token with no linked
- * account) swaps the whole shell for the "account not linked" card.
+ * `/v1/me`, the auth-mode badge, sign-out) over five sections: Attention (default),
+ * Hosts, Sessions, Devices, Log. A `401` from `/v1/me` (a valid-shaped token with no
+ * linked account) swaps the whole shell for the "account not linked" card.
  */
 import { type ReactNode, useState } from 'react'
 import { isUnauthorized } from '../api'
@@ -13,10 +13,11 @@ import { useLoad } from '../lib/hooks'
 import { AttentionView } from '../views/Attention'
 import { DevicesView } from '../views/Devices'
 import { HostsView } from '../views/Hosts'
+import { LogView } from '../views/Log'
 import { SessionsView } from '../views/Sessions'
 
-/** The four console sections. */
-type Tab = 'attention' | 'hosts' | 'sessions' | 'devices'
+/** The five console sections. */
+type Tab = 'attention' | 'hosts' | 'sessions' | 'devices' | 'log'
 
 /** The labels + order of the nav tabs. */
 const TABS: readonly { readonly id: Tab; readonly label: string }[] = [
@@ -24,6 +25,7 @@ const TABS: readonly { readonly id: Tab; readonly label: string }[] = [
   { id: 'hosts', label: 'Hosts' },
   { id: 'sessions', label: 'Sessions' },
   { id: 'devices', label: 'Devices' },
+  { id: 'log', label: 'Log' },
 ]
 
 /** The console shell. */
@@ -85,6 +87,7 @@ export function Console(): ReactNode {
         {tab === 'hosts' ? <HostsView /> : null}
         {tab === 'sessions' ? <SessionsView /> : null}
         {tab === 'devices' ? <DevicesView /> : null}
+        {tab === 'log' ? <LogView /> : null}
       </main>
     </div>
   )

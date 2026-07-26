@@ -57,6 +57,8 @@ targets:
           - voip
           - remote-notification
         NSCameraUsageDescription: Pherry scans a pairing QR to dock a host.
+        # S4: a presence-gated device key asks Face ID before every signing (steering) attempt.
+        NSFaceIDUsageDescription: Pherry asks Face ID before this phone's key signs in to steer a host.
         # The local dev loop reaches a control plane + relay on your Mac's LAN IP;
         # iOS asks the user for local-network permission the first time.
         NSLocalNetworkUsageDescription: Pherry connects to your own control plane and relay on this network.

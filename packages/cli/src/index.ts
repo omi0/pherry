@@ -63,8 +63,17 @@ export {
 } from './device-keyring.js'
 export { enrollDevice } from './commands/dock.js'
 export type { EnrollDeviceOptions, EnrollDeviceResult } from './commands/dock.js'
-export { runDevicesList, runDevicesRevoke } from './commands/devices.js'
+export { runDevicesList, runDevicesLog, runDevicesRevoke } from './commands/devices.js'
 export type { DevicesOptions } from './commands/devices.js'
+
+// S4 — the local audit trail: who touched this host, as which device.
+export {
+  type AuditEvent,
+  type AuditKind,
+  appendAudit,
+  auditLogPath,
+  readAudit,
+} from './audit-log.js'
 
 // The dev commands, as callable functions.
 export { resolveAgentArgv, startRun } from './commands/run.js'

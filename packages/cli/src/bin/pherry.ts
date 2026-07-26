@@ -25,7 +25,7 @@ import {
   runAttentionWatch,
 } from '../commands/attention.js'
 import { runAnchor, runBoard, runUnboard } from '../commands/board.js'
-import { runDevicesList, runDevicesRevoke } from '../commands/devices.js'
+import { runDevicesList, runDevicesLog, runDevicesRevoke } from '../commands/devices.js'
 import { enrollDevice, runDock } from '../commands/dock.js'
 import { runHostsForget, runHostsList, runHostsTrust } from '../commands/hosts.js'
 import { runOpen } from '../commands/open.js'
@@ -47,7 +47,7 @@ Usage:
   pherry sessions                   list the daemon's live sessions
   pherry hosts list | trust <id> --key <b64> | forget <id>
                                     the host keys this machine trusts for a remote attach
-  pherry devices list | revoke <deviceKeyId>
+  pherry devices list | revoke <deviceKeyId> | log
                                     the devices this host accepts remote steering from
   pherry attention raise --kind <k> --summary <text> [--session <ref>]
                                     tell your operator a session needs a human
@@ -319,6 +319,8 @@ const DEVICES_USAGE = `pherry devices — the devices this host accepts remote s
 Usage:
   pherry devices list                        show every enrolled device + its fingerprint
   pherry devices revoke <deviceKeyId>        cut a device off (takes effect next connection)
+  pherry devices log [--limit <n>]           the local audit trail: connections, custody,
+                                             enrollments — each with the device that did it
 
 Enrollment is the \`pherry dock\` ceremony — a human compares the fingerprint the
 host prints with the one the phone shows. There is deliberately no way to enroll
@@ -343,6 +345,21 @@ async function devicesCommand(argv: string[]): Promise<number> {
       return 2
     }
     return (await runDevicesRevoke(deviceKeyId, { ...baseDirOption(), onLine: write })) ? 0 : 1
+  }
+
+  if (subcommand === 'log') {
+    const { values } = parseArgs({
+      args: rest,
+      allowPositionals: false,
+      options: { limit: { type: 'string' } },
+    })
+    const limit = values.limit ? Number.parseInt(values.limit, 10) : undefined
+    await runDevicesLog({
+      ...baseDirOption(),
+      ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
+      onLine: write,
+    })
+    return 0
   }
 
   process.stderr.write(`${DEVICES_USAGE}\n`)

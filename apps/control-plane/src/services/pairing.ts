@@ -18,6 +18,7 @@ import type { Host, Org, User } from '../db/schema.js'
 import { devices, hosts, pairTokens, users } from '../db/schema.js'
 import type { IdentityProvider } from '../identity.js'
 import { newPairTokenId } from '../ids.js'
+import { appendAuditEvent } from './audit.js'
 import { mintSecret, sha256Hex } from './auth.js'
 
 /** The result of minting a pair token: the one-time plaintext, its expiry, the QR payload. */
@@ -148,6 +149,17 @@ export async function redeemPairToken(
     .update(pairTokens)
     .set({ redeemedDeviceId: device.id })
     .where(eq(pairTokens.id, token.id))
+
+  // S4 `device-paired` — the enrollment event, awaited inside the redeem so an
+  // unlogged pairing cannot succeed. `detail` records the display name and
+  // whether an identity key was carried — never the dt_/pt_ plaintext.
+  await appendAuditEvent(db, now, {
+    orgId: token.orgId,
+    kind: 'device-paired',
+    hostId: token.hostId,
+    deviceId: device.id,
+    detail: { name: device.name, identityKey: opts.devicePublicKeyB64 !== undefined },
+  })
 
   const hostRows = await db.select().from(hosts).where(eq(hosts.id, token.hostId)).limit(1)
   const host = hostRows[0]

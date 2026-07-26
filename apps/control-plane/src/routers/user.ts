@@ -2,8 +2,8 @@
  * The **user API** — routes authenticated by a human bearer token (§4a). A missing
  * or invalid token → `401`; a host/device belonging to another org → `404` (it is
  * invisible, not forbidden). Everything a person does from the dashboard or `dock`
- * lives here: registering hosts, minting pair tokens, listing/revoking devices, and
- * reading session metadata.
+ * lives here: registering hosts, minting pair tokens, listing/revoking devices,
+ * reading session metadata, and reading the enrollment/authorization log (S4).
  */
 import { decodeKey } from '@pherry/channel'
 import { newHostId } from '@pherry/protocol'
@@ -11,6 +11,7 @@ import { and, count, eq, isNull } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { devices, hosts, sessions } from '../db/schema.js'
+import { appendAuditEvent, listAuditEvents } from '../services/audit.js'
 import { mintSecret } from '../services/auth.js'
 import { mintPairToken } from '../services/pairing.js'
 import { OkResponse, isoOrNull, parseBody, requireHuman, sendError } from './http.js'
@@ -94,6 +95,23 @@ const SessionSummary = z.object({
 })
 const ListSessionsResponse = z.object({ sessions: z.array(SessionSummary) })
 
+/**
+ * `GET /v1/audit` query: an optional page-size `limit`. Out-of-range values are
+ * clamped by the service (default 100, max 500) — never an error.
+ */
+const AuditListQuery = z.object({ limit: z.coerce.number().optional() })
+
+/** One enrollment/authorization log event as `GET /v1/audit` renders it (S4). */
+const AuditEventView = z.object({
+  id: z.string(),
+  kind: z.string(),
+  hostId: z.string().nullable(),
+  deviceId: z.string().nullable(),
+  detail: z.record(z.unknown()).nullable(),
+  createdAt: z.string(),
+})
+const ListAuditResponse = z.object({ events: z.array(AuditEventView) })
+
 /** Register the human-authenticated user API onto `app`. */
 export async function userRoutes(app: FastifyInstance): Promise<void> {
   // GET /v1/me — the dashboard's session probe: the caller's user + org, or 401.
@@ -144,6 +162,15 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     const created = rows[0]
     if (created === undefined) throw new Error('POST /v1/hosts: insert returned no row')
 
+    // S4: the enrollment is logged in the same request — an unlogged host must not
+    // exist. (A `dock` that reuses a still-valid credential never calls this route,
+    // so reuse is never logged as a fresh registration.)
+    await appendAuditEvent(app.db, app.now(), {
+      orgId: principal.org.id,
+      kind: 'host-registered',
+      hostId: created.id,
+    })
+
     return CreateHostResponse.parse({
       host: {
         id: created.id,
@@ -186,6 +213,12 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       user: principal.user,
       org: principal.org,
     })
+    // S4: the mint is logged in the same request (ids only — never the pt_ plaintext).
+    await appendAuditEvent(app.db, app.now(), {
+      orgId: principal.org.id,
+      kind: 'pair-minted',
+      hostId: host.id,
+    })
     return PairMintResponse.parse(result)
   })
 
@@ -200,10 +233,21 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     if (host === undefined || host.orgId !== principal.org.id) {
       return sendError(reply, 404, 'host-not-found', 'no such host')
     }
-    await app.db
+    // The `revoked_at IS NULL` guard makes "first revocation" race-proof: repeat
+    // deletes stay idempotent 200s, but only the winning claim logs (S4) — a
+    // second revoke must never duplicate the audit row.
+    const revoked = await app.db
       .update(hosts)
       .set({ revokedAt: new Date(app.now()), updatedAt: new Date(app.now()) })
-      .where(eq(hosts.id, host.id))
+      .where(and(eq(hosts.id, host.id), isNull(hosts.revokedAt)))
+      .returning()
+    if (revoked[0] !== undefined) {
+      await appendAuditEvent(app.db, app.now(), {
+        orgId: principal.org.id,
+        kind: 'host-revoked',
+        hostId: host.id,
+      })
+    }
     return OkResponse.parse({ ok: true })
   })
 
@@ -236,10 +280,20 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     if (device === undefined || device.orgId !== principal.org.id) {
       return sendError(reply, 404, 'device-not-found', 'no such device')
     }
-    await app.db
+    // Same first-revocation discipline as the host route: the guarded UPDATE wins
+    // once, and only that winner appends the S4 audit row.
+    const revoked = await app.db
       .update(devices)
       .set({ revokedAt: new Date(app.now()), updatedAt: new Date(app.now()) })
-      .where(eq(devices.id, device.id))
+      .where(and(eq(devices.id, device.id), isNull(devices.revokedAt)))
+      .returning()
+    if (revoked[0] !== undefined) {
+      await appendAuditEvent(app.db, app.now(), {
+        orgId: principal.org.id,
+        kind: 'device-revoked',
+        deviceId: device.id,
+      })
+    }
     return OkResponse.parse({ ok: true })
   })
 
@@ -269,6 +323,25 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         status: s.status,
         startedAt: s.startedAt.toISOString(),
         endedAt: isoOrNull(s.endedAt),
+      })),
+    })
+  })
+
+  // GET /v1/audit — the org's enrollment/authorization log (S4), newest first.
+  app.get('/v1/audit', async (request, reply) => {
+    const principal = await requireHuman(request, reply)
+    if (principal === null) return
+    const query = parseBody(reply, AuditListQuery, request.query)
+    if (query === undefined) return
+    const rows = await listAuditEvents(app.db, { orgId: principal.org.id, limit: query.limit })
+    return ListAuditResponse.parse({
+      events: rows.map((e) => ({
+        id: e.id,
+        kind: e.kind,
+        hostId: e.hostId,
+        deviceId: e.deviceId,
+        detail: e.detail,
+        createdAt: e.createdAt.toISOString(),
       })),
     })
   })

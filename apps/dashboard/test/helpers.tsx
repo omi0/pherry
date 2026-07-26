@@ -25,6 +25,7 @@ export function makeFakeApi(overrides: Partial<DashboardApi> = {}): DashboardApi
     listDevices: overrides.listDevices ?? notStubbed('listDevices'),
     revokeDevice: overrides.revokeDevice ?? notStubbed('revokeDevice'),
     listAttention: overrides.listAttention ?? notStubbed('listAttention'),
+    listAudit: overrides.listAudit ?? notStubbed('listAudit'),
     ackAttention: overrides.ackAttention ?? notStubbed('ackAttention'),
     describeCliAuth: overrides.describeCliAuth ?? notStubbed('describeCliAuth'),
     approveCliAuth: overrides.approveCliAuth ?? notStubbed('approveCliAuth'),

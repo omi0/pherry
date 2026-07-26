@@ -61,6 +61,51 @@ func makeAttentionItem(
     return try! JSONDecoder().decode(AttentionItem.self, from: data)
 }
 
+/// A paired in-memory ``ByteTransport``: each side's `send` delivers into the other side's
+/// `inbound` — loops an initiator and a responder ``SecureChannel`` together in-process, so
+/// the seam tests drive the real channel + controller stack with no sockets.
+final class LoopbackTransport: ByteTransport, @unchecked Sendable {
+    let inbound: AsyncThrowingStream<Data, Error>
+    private let ownContinuation: AsyncThrowingStream<Data, Error>.Continuation
+    private let peerContinuation: AsyncThrowingStream<Data, Error>.Continuation
+    private let lock = NSLock()
+    private var closed = false
+
+    private init(
+        inbound: AsyncThrowingStream<Data, Error>,
+        own: AsyncThrowingStream<Data, Error>.Continuation,
+        peer: AsyncThrowingStream<Data, Error>.Continuation
+    ) {
+        self.inbound = inbound
+        self.ownContinuation = own
+        self.peerContinuation = peer
+    }
+
+    /// Create a connected pair.
+    static func pair() -> (LoopbackTransport, LoopbackTransport) {
+        let (aStream, aCont) = AsyncThrowingStream<Data, Error>.makeStream()
+        let (bStream, bCont) = AsyncThrowingStream<Data, Error>.makeStream()
+        let a = LoopbackTransport(inbound: aStream, own: aCont, peer: bCont)
+        let b = LoopbackTransport(inbound: bStream, own: bCont, peer: aCont)
+        return (a, b)
+    }
+
+    func send(_ data: Data) async throws {
+        peerContinuation.yield(data)
+    }
+
+    func close() async {
+        let already = lock.withLock { () -> Bool in
+            let was = closed
+            closed = true
+            return was
+        }
+        guard !already else { return }
+        ownContinuation.finish()
+        peerContinuation.finish()
+    }
+}
+
 /// A base64url-encoded 32-byte key (what a `pherry://pair` link carries).
 func base64urlKey(byte: UInt8 = 0x2a) -> String {
     Data(repeating: byte, count: 32)

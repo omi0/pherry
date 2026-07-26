@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import {
   attentionEvents,
+  auditEvents,
   devices,
   hosts,
   orgs,
@@ -10,7 +11,12 @@ import {
   sessions,
   users,
 } from '../src/db/schema.js'
-import { newAttentionEventId, newPairTokenId, newSessionRowId } from '../src/ids.js'
+import {
+  newAttentionEventId,
+  newAuditEventId,
+  newPairTokenId,
+  newSessionRowId,
+} from '../src/ids.js'
 import { makeTestDb, seedDevice, seedHost, seedOrg, seedUser } from './support.js'
 
 describe('schema round-trip', () => {
@@ -101,6 +107,38 @@ describe('schema round-trip', () => {
       .returning()
     expect(bare[0]?.options).toBeNull()
     expect(bare[0]?.question).toBeNull()
+  })
+
+  it('round-trips an audit_events row (jsonb detail, nullable ids) via real migration 0004', async () => {
+    const db = await makeTestDb()
+    const org = await seedOrg(db)
+    const user = await seedUser(db, { orgId: org.id })
+    const { host } = await seedHost(db, { orgId: org.id, userId: user.id })
+    const rows = await db
+      .insert(auditEvents)
+      .values({
+        id: newAuditEventId(),
+        orgId: org.id,
+        kind: 'device-paired',
+        hostId: host.id,
+        deviceId: 'dev_0000',
+        detail: { name: 'pixel', identityKey: true },
+      })
+      .returning()
+    const row = rows[0]
+    expect(row?.id).toMatch(/^aud_[0-9a-f]{32}$/)
+    expect(row?.detail).toEqual({ name: 'pixel', identityKey: true })
+    expect(row?.createdAt).toBeInstanceOf(Date)
+
+    // hostId / deviceId / detail are all nullable — a ticket minted to a human
+    // names no device, and most kinds carry no detail.
+    const bare = await db
+      .insert(auditEvents)
+      .values({ id: newAuditEventId(), orgId: org.id, kind: 'host-registered' })
+      .returning()
+    expect(bare[0]?.hostId).toBeNull()
+    expect(bare[0]?.deviceId).toBeNull()
+    expect(bare[0]?.detail).toBeNull()
   })
 
   it('rejects an attention_events row whose host_id has no host row (FK)', async () => {

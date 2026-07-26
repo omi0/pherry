@@ -25,3 +25,6 @@ export const newSessionRowId = (): string => `ses_${hex32()}`
 
 /** Mint an attention-event row id: `att_<32 hex>`. */
 export const newAttentionEventId = (): string => `att_${hex32()}`
+
+/** Mint an audit-event row id: `aud_<32 hex>`. */
+export const newAuditEventId = (): string => `aud_${hex32()}`

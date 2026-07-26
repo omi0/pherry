@@ -16,6 +16,7 @@ import {
 } from '@pherry/relay-core'
 import { Controller, type DeviceSigner } from '@pherry/sdk'
 import { afterEach, describe, expect, it } from 'vitest'
+import { readAudit } from '../src/audit-log.js'
 import { connectDaemon } from '../src/daemon/client.js'
 import { deviceSignerFor, loadOrCreateDeviceKey } from '../src/device-key.js'
 import { writeAuthorizedDevice } from '../src/device-keyring.js'
@@ -277,6 +278,29 @@ describe('serve — the outbound relay uplink (leg-P2c §1)', () => {
 
     await controller.input(sessionRef, enc('whoami\n'))
     expect(inner.writesTo(rec.lastSpawned()).map(dec)).toContain('whoami\n')
+
+    // S4: everything above landed in the local audit trail — the local-socket
+    // custody path attributed `local`, the relay steer attributed to the
+    // enrolled device key that signed the Hello.
+    await waitFor(async () =>
+      (await readAudit(baseDir)).some((e) => e.kind === 'connection-accepted'),
+    )
+    const auditTrail = await readAudit(baseDir)
+    expect(
+      auditTrail.some(
+        (e) =>
+          e.kind === 'connection-accepted' &&
+          e.deviceKeyId === dock.deviceSigner.deviceKeyId &&
+          e.transport === 'relay',
+      ),
+    ).toBe(true)
+    expect(auditTrail.some((e) => e.kind === 'connection-local' && e.deviceKeyId === 'local')).toBe(
+      true,
+    )
+    expect(auditTrail.some((e) => e.kind === 'custody-reserve' && e.detail === sessionRef)).toBe(
+      true,
+    )
+    expect(auditTrail.some((e) => e.kind === 'custody-claim' && e.detail === sessionRef)).toBe(true)
   })
 
   /**
@@ -316,6 +340,17 @@ describe('serve — the outbound relay uplink (leg-P2c §1)', () => {
     // The channel completes (the stranger has the pinned host key and a valid
     // ticket) and the Hello is perfectly well-formed — yet nothing is served.
     await neverServed(controller)
+
+    // S4: the refusal is evidence, not silence — the stranger's claimed key id
+    // landed in the audit trail.
+    await waitFor(async () =>
+      (await readAudit(baseDir)).some(
+        (e) =>
+          e.kind === 'connection-refused' &&
+          e.deviceKeyId === strangerKey.deviceKeyId &&
+          e.transport === 'relay',
+      ),
+    )
   })
 
   it('SECURITY (S3): a signerless (null-claim) controller is refused over the relay', async () => {

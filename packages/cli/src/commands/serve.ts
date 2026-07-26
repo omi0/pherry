@@ -65,6 +65,7 @@ import {
 } from '@pherry/protocol'
 import { relayChannelContext } from '@pherry/relay-core'
 import { type ListeningServer, listenUnix } from '@pherry/transport-node'
+import { appendAudit } from '../audit-log.js'
 import { connectCell } from '../cell-url.js'
 import { ControlPlaneClient, type SessionReport } from '../control-plane-client.js'
 import { isProcessAlive, readPidFile, removePidFile, writePidFile } from '../daemon/pidfile.js'
@@ -187,14 +188,32 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
   // frames by it, so every concurrent session must own a distinct one.
   let nextStreamId = 1
 
+  // The audit trail (S4): every connection and custody action lands a line in
+  // ~/.pherry/audit.log with the identity that performed it — a claimed
+  // deviceKeyId over the relay, `local` for the filesystem-trusted socket.
+  // Best-effort by design (see audit-log.ts): a full disk never refuses a
+  // connection, so a failed write is dropped.
+  const audit = (event: Parameters<typeof appendAudit>[0]): void => {
+    void appendAudit(event, baseDir)
+  }
+
   const custody: CustodyHooks = {
     reserve(spec) {
       desk.sweepExpired()
       const reservation = desk.reserveOpenSession(spec as SessionSpec, reserveTtlMs)
       launches.set(reservation.ref, { argv: spec.argv, cwd: spec.cwd, startedAt: now() })
+      // Custody is local-socket-only (H1), so the actor is the filesystem-
+      // trusted local identity, attributed as such.
+      audit({
+        kind: 'custody-reserve',
+        deviceKeyId: 'local',
+        transport: 'local',
+        detail: reservation.ref,
+      })
       return { sessionRef: reservation.ref, expiresAt: reservation.expiresAt }
     },
     async claim(sessionRef) {
+      audit({ kind: 'custody-claim', deviceKeyId: 'local', transport: 'local', detail: sessionRef })
       const session = await desk.claimOpenSession(sessionRef, backend, { streamId: nextStreamId++ })
       // When the process ends, drop the session so it stops being listed/mirrored,
       // and remember it for the next heartbeat's `ended` report.
@@ -239,6 +258,8 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     server = await listenUnix(socketPath, (duplex) => {
       const channel = new SecureChannel({ role: 'responder', duplex, staticKey })
       channels.add(channel)
+      // Trust-by-filesystem at the socket's 0600 — recorded as such (S4).
+      audit({ kind: 'connection-local', deviceKeyId: 'local', transport: 'local' })
       const served = serveConnection(channel, registry, { custody, listSessions })
       // Replaces serveConnection's own onClose with one that still tears the
       // subscriptions down (served.close() is idempotent) and also forgets the
@@ -313,9 +334,22 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
           // key over this machine's keyring (`~/.pherry/devices.json`). The
           // local unix-socket path above deliberately passes no `verifyDevice`
           // — it stays trust-by-filesystem at the socket's 0600.
+          //
+          // The gate is wrapped for the audit trail (S4): the verdict — and the
+          // claimed deviceKeyId — lands in ~/.pherry/audit.log either way, so a
+          // refused stranger is evidence, not silence.
+          const verifyDevice = buildVerifyDevice(dock.hostId, baseDir)
           const served = serveConnection(channel, registry, {
             listSessions,
-            verifyDevice: buildVerifyDevice(dock.hostId, baseDir),
+            verifyDevice: async (claim) => {
+              const allowed = await verifyDevice(claim)
+              audit({
+                kind: allowed ? 'connection-accepted' : 'connection-refused',
+                deviceKeyId: claim.deviceKeyId,
+                transport: 'relay',
+              })
+              return allowed
+            },
           })
           // Same onClose bookkeeping as a local connection.
           channel.onClose(() => {

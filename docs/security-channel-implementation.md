@@ -334,7 +334,26 @@ the leg.
 
 ---
 
-## S4 — Presence gating and the enrollment log
+## S4 — Presence gating and the enrollment log — **DONE**
+
+> **Status: shipped.** All three halves landed per the pinned contracts below, with these findings:
+> **(a)** the Simulator empirically reports `SecureEnclave.isAvailable == true` (simulated enclave,
+> ungated keys work) but refuses `.userPresence` creation (LAError −1020), so gating support is its
+> own probe (`presenceGatingSupported`), not `secureEnclaveBacked`; the toggle's disabled label
+> distinguishes the two. **(b)** Default-on degrades honestly on a passcode-less device (ungated key,
+> flag records the truth, toggle shows off); explicit rotation never degrades — it throws with the
+> old key untouched. **(c)** The persisted `presenceGated` flag is optional in the keychain blob so
+> S3-era keys decode as ungated with no forced re-enrollment. **(d)** Host audit: `~/.pherry/audit.log`
+> JSONL via `audit-log.ts`, wired by wrapping serve.ts's gate/custody/accept paths; `pherry devices
+> log` reads it. **(e)** Control plane: `audit_events` + migration `0004_third_gravity.sql`, six
+> write sites, `GET /v1/audit`, dashboard **Log** tab; both DELETE routes hardened to guarded
+> first-revocation updates (`WHERE revoked_at IS NULL … RETURNING`) so "first revocation logs" is
+> race-proof — a repeat DELETE no longer re-stamps the original revocation instant (behavioral fix,
+> flagged). **(f)** A >8s Face ID stall hits `HostConnection`'s generic auth deadline — fail-closed
+> but not biometric-specific copy; noted for a UI polish pass. Live-device Face ID prompt/cancel
+> remains manually unverified (Simulator cannot exercise it; the denying-signer double proves the
+> fail-closed path). Gate: 1017 JS tests (cli 206 · control-plane 355 · dashboard 59, others
+> unchanged), PherryKit 50, app bundle 56, unsigned simulator build, biome clean.
 
 - Re-create the iOS Secure Enclave key with
   `SecAccessControlCreateWithFlags(.privateKeyUsage, .userPresence)` so **signing the Hello is itself a

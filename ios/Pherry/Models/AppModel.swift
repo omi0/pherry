@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import PherryKit
 import SwiftUI
@@ -41,9 +42,17 @@ final class AppModel {
     /// CallKit ring handling.
     let calls: CallManager
     /// The phone's long-lived signing identity (S3) — created on first launch, Secure
-    /// Enclave-backed wherever one exists. Its public half rides along on `redeem` and its
-    /// signature inside every `Hello` is what a device-gated host verifies.
-    let deviceIdentity: DeviceIdentity
+    /// Enclave-backed wherever one exists, presence-gated by default (S4). Its public half
+    /// rides along on `redeem` and its signature inside every `Hello` is what a device-gated
+    /// host verifies. Replaced only by ``confirmIdentityRotation()``.
+    private(set) var deviceIdentity: DeviceIdentity
+
+    /// A requested presence-gating flip awaiting the user's explicit confirmation — the new
+    /// mode the Settings toggle asked for. An enclave key's access control is fixed at
+    /// creation, so flipping it is a **key rotation** (new fingerprint, every host must
+    /// re-pair); nothing rotates until ``confirmIdentityRotation()``. The confirm dialog
+    /// binds to this being non-nil.
+    private(set) var pendingIdentityRotation: Bool?
 
     // MARK: Navigation intents (SwiftUI binds to these)
 
@@ -57,17 +66,26 @@ final class AppModel {
     var pendingSessionTarget: SessionTarget?
 
     private let keychain: KeychainStore
+    /// Whether a Secure Enclave exists here — injected so tests can force the software
+    /// fallback deterministically (no Secure Enclave in CI); production uses the real probe.
+    private let secureEnclaveAvailable: Bool
     private static let stateKey = "pherry.state.v1"
 
     /// Whether a credential exists — the app has been docked at least once.
     var isPaired: Bool { deviceToken != nil }
 
-    init(keychain: KeychainStore = SystemKeychain()) {
+    init(
+        keychain: KeychainStore = SystemKeychain(),
+        secureEnclaveAvailable: Bool = SecureEnclave.isAvailable
+    ) {
         self.keychain = keychain
+        self.secureEnclaveAvailable = secureEnclaveAvailable
         self.attention = AttentionStore()
         self.push = PushRegistrar()
         self.calls = CallManager()
-        self.deviceIdentity = DeviceIdentity.loadOrCreate(keychain: keychain)
+        self.deviceIdentity = DeviceIdentity.loadOrCreate(
+            keychain: keychain, secureEnclaveAvailable: secureEnclaveAvailable
+        )
         load()
         // Answering a ring opens the session and acks the event (decline leaves it pending).
         calls.onAnswer = { [weak self] call in
@@ -174,6 +192,37 @@ final class AppModel {
         hosts = []
         keychain.delete(Self.stateKey)
         attention.configure(api: nil)
+    }
+
+    // MARK: - Device identity rotation (S4)
+
+    /// The Settings toggle's intent: flip presence gating to `presenceGated`. Records the
+    /// request for the confirm dialog and does **nothing else** — the toggle alone never
+    /// touches the key. (The model deliberately doesn't reject a same-mode request: a
+    /// confirmed rotation is a legitimate re-key either way; the UI's toggle only ever emits
+    /// real flips.)
+    func requestIdentityRotation(presenceGated: Bool) {
+        pendingIdentityRotation = presenceGated
+    }
+
+    /// The user backed out of the confirm dialog — forget the request; the key is untouched.
+    func cancelIdentityRotation() {
+        pendingIdentityRotation = nil
+    }
+
+    /// The **only** path that rotates the device identity — reached exclusively from the
+    /// confirm dialog's destructive button. Mints the new key in the requested mode, replaces
+    /// the persisted blob, and returns the new identity so the UI can surface the fingerprint
+    /// every host now needs to re-enroll. Throws ``IdentityRotationRefusal`` with the old key
+    /// untouched (and the request cleared) if the mode can't be delivered.
+    @discardableResult
+    func confirmIdentityRotation() throws -> DeviceIdentity {
+        guard let mode = pendingIdentityRotation else { return deviceIdentity }
+        defer { pendingIdentityRotation = nil }
+        deviceIdentity = try DeviceIdentity.rotate(
+            keychain: keychain, presenceGated: mode, secureEnclaveAvailable: secureEnclaveAvailable
+        )
+        return deviceIdentity
     }
 
     // MARK: - Push
