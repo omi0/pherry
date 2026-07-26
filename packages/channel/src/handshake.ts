@@ -26,9 +26,11 @@
  * transport ordering (who speaks first) is driven by {@link SecureChannel}.
  *
  * Secret hygiene: once {@link Handshake.consume} has derived the keys, it
- * zero-fills its own ephemeral secret. This is **best-effort** — JS gives no
- * guaranteed erasure (the runtime may have copied the bytes) — it only narrows
- * the window in which the raw ephemeral lingers on the heap. The responder's
+ * zero-fills its own ephemeral secret and the two DH shared secrets
+ * (`deriveSessionKeys` consumes the latter; this module re-wipes them so its
+ * hygiene does not depend on the kdf's contract). This is **best-effort** — JS
+ * gives no guaranteed erasure (the runtime may have copied the bytes) — it only
+ * narrows the window in which raw secrets linger on the heap. The responder's
  * long-term static is owned by the caller and is never wiped here.
  */
 import { x25519 } from '@noble/curves/ed25519.js'
@@ -99,8 +101,11 @@ export function initiatorHandshake(pinnedHostStatic: Uint8Array, context?: Uint8
         responderEphemeralPub,
         ...(context !== undefined ? { context } : {}),
       })
-      // The ephemeral secret has served its purpose; wipe it (best-effort).
+      // Wipe every secret this side no longer needs (best-effort): the
+      // ephemeral, and the DH secrets the kdf already consumed (re-asserted).
       ephemeral.secretKey.fill(0)
+      dhEE.fill(0)
+      dhES.fill(0)
       return keys
     },
   }
@@ -130,8 +135,11 @@ export function responderHandshake(ownStatic: KeyPair, context?: Uint8Array): Ha
         responderEphemeralPub: ephemeral.publicKey,
         ...(context !== undefined ? { context } : {}),
       })
-      // Wipe the ephemeral secret (best-effort); the long-term static stays put.
+      // Wipe the ephemeral and the (kdf-consumed, re-asserted) DH secrets;
+      // the long-term static stays put — it is the caller's.
       ephemeral.secretKey.fill(0)
+      dhEE.fill(0)
+      dhES.fill(0)
       return keys
     },
   }

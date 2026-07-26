@@ -105,7 +105,16 @@ phone (`ios/Pherry/Connect/HostConnection.swift:99`).
 
 ---
 
-## S2 — Channel hygiene *(the code audit's list, made structural)*
+## S2 — Channel hygiene *(the code audit's list, made structural)* — **DONE**
+
+> **Status: shipped.** All five items landed, local to `packages/channel` as specified (plus one
+> pre-existing S1 test gap fixed in passing: `apps/relay/test/cli-e2e.test.ts` called `runAttach`
+> without `baseDir`, so the S1 pin lookup missed the dock-seeded `known_hosts.json` and the non-TTY
+> refusal killed the mirror test). M1's coalescing uses a geometric-slack accumulator — a plain
+> merge-per-threshold would be O(n²/256) under exactly the dribble attack M1 targets; the slack makes
+> the amortised-O(n) claim below true. Item 4 shipped per the amendment (one pre-auth record, not
+> zero). Gate: 952 JS tests (channel 80, +7 new), PherryKit 41, app bundle 39, unsigned simulator
+> build, biome clean.
 
 Local to `packages/channel`; no wire change, no iOS change.
 

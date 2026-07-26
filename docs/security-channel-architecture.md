@@ -220,7 +220,7 @@ Each leg is independently shippable and green-gated; the house pattern is a `doc
 | Leg | Content | Wire change? | Blocks |
 |---|---|---|---|
 | **S1** ✅ | L1 pin provenance — iOS fallback deleted, CLI `known_hosts` | no | — |
-| **S2** | L4 channel hygiene + structural `send()` gate | no | — |
+| **S2** ✅ | L4 channel hygiene + structural `send()` gate | no | — |
 | **S3** | L2 + L3 device identity, enrollment ceremony, signed Hello | **yes** — `Hello` fields + protocol version bump; iOS vectors regenerate | S1 |
 | **S4** | L5 presence gating; enrollment log on dashboard | no | S3 |
 | **S5** | External audit (below) | — | S1–S3 |

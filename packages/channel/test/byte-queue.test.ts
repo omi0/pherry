@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ByteQueue } from '../src/byte-queue.js'
+import { ByteQueue, COALESCE_THRESHOLD } from '../src/byte-queue.js'
 
 /** Build a big-endian uint32 length prefix. */
 function prefix(length: number): Uint8Array {
@@ -73,5 +73,72 @@ describe('ByteQueue', () => {
     expect(record[0]).toBe(0)
     expect(record[255]).toBe(255)
     expect(record[record.length - 1]).toBe((payload.length - 1) & 0xff)
+  })
+
+  // --- Chunk-count bound (M1) ----------------------------------------------
+
+  it('bounds the chunk count under a 4 MiB one-byte dribble and stays byte-identical (M1)', () => {
+    const payload = new Uint8Array(4 * 1024 * 1024)
+    for (let i = 0; i < payload.length; i++) payload[i] = (i * 31 + (i >> 8)) & 0xff
+
+    const q = new ByteQueue()
+    let maxChunks = 0
+    for (let i = 0; i < payload.length; i++) {
+      q.push(payload.subarray(i, i + 1))
+      if (q.chunkCount > maxChunks) maxChunks = q.chunkCount
+    }
+    // The count never escapes the bound, no matter how hostile the chunking.
+    expect(maxChunks).toBeLessThanOrEqual(COALESCE_THRESHOLD)
+    expect(q.length).toBe(payload.length)
+
+    const out = q.take(payload.length)
+    expect(Buffer.from(out).equals(Buffer.from(payload))).toBe(true)
+    expect(q.length).toBe(0)
+  })
+
+  it('coalescing keeps the stream intact across interleaved pushes and takes', () => {
+    // A deterministic mixed workload: uneven pushes, uneven takes, so takes land
+    // inside the accumulator, at its edges, and across freshly pushed chunks.
+    const total = 300_000
+    const source = new Uint8Array(total)
+    for (let i = 0; i < total; i++) source[i] = (i * 7 + 13) & 0xff
+
+    const q = new ByteQueue()
+    const out = new Uint8Array(total)
+    let pushed = 0
+    let taken = 0
+    let step = 0
+    while (taken < total) {
+      // push a small burst (1..17 bytes each) while there is input left
+      for (let burst = 0; burst < 40 && pushed < total; burst++) {
+        const size = Math.min(1 + ((step * 11) % 17), total - pushed)
+        q.push(source.subarray(pushed, pushed + size))
+        pushed += size
+        step++
+      }
+      // take an unrelated odd size so boundaries drift against push boundaries
+      const want = Math.min(1 + ((step * 29) % 613), q.length)
+      if (want > 0) {
+        out.set(q.take(want), taken)
+        taken += want
+      }
+      expect(q.chunkCount).toBeLessThanOrEqual(COALESCE_THRESHOLD)
+    }
+    expect(Buffer.from(out).equals(Buffer.from(source))).toBe(true)
+    expect(q.length).toBe(0)
+  })
+
+  it('peekUint32BE still spans chunks after a coalesce', () => {
+    const q = new ByteQueue()
+    // Force a coalesce with 300 one-byte pushes of a known prefix + filler.
+    const data = new Uint8Array(300)
+    data.set(prefix(0x0a0b0c0d), 0)
+    for (let i = 4; i < data.length; i++) data[i] = i & 0xff
+    for (let i = 0; i < data.length; i++) q.push(data.subarray(i, i + 1))
+    expect(q.chunkCount).toBeLessThanOrEqual(COALESCE_THRESHOLD)
+    expect(q.peekUint32BE()).toBe(0x0a0b0c0d)
+    expect(q.length).toBe(300)
+    q.take(4)
+    expect([...q.take(2)]).toEqual([4, 5])
   })
 })

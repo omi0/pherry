@@ -24,6 +24,12 @@
  * 32-byte keys) and the context is the tail. `dh_ee` supplies forward secrecy
  * (both sides are ephemeral); `dh_es` authenticates the responder (only the
  * pinned static holder can reproduce it).
+ *
+ * Secret hygiene (M2): the schedule **consumes** its DH inputs. Once the output
+ * slices exist, `deriveSessionKeys` zero-fills the caller's `dhEE` / `dhES`,
+ * its own concatenated `ikm`, and the `okm` master copy — best-effort, as
+ * everywhere in this package: JS gives no guaranteed erasure, this only narrows
+ * the window in which raw secrets linger on the heap.
  */
 import { hkdf } from '@noble/hashes/hkdf.js'
 import { sha256 } from '@noble/hashes/sha256.js'
@@ -59,9 +65,15 @@ export interface SessionKeys {
 
 /** The Diffie-Hellman inputs and transcript both roles feed into the schedule. */
 export interface KeyScheduleInput {
-  /** `dh_ee` — ephemeral↔ephemeral shared secret (forward secrecy). */
+  /**
+   * `dh_ee` — ephemeral↔ephemeral shared secret (forward secrecy).
+   * Consumed: zero-filled by {@link deriveSessionKeys} once the keys derive.
+   */
   readonly dhEE: Uint8Array
-  /** `dh_es` — ephemeral↔static shared secret (responder authentication). */
+  /**
+   * `dh_es` — ephemeral↔static shared secret (responder authentication).
+   * Consumed: zero-filled by {@link deriveSessionKeys} once the keys derive.
+   */
   readonly dhES: Uint8Array
   /** The initiator's ephemeral public key (`e_I.pub`). */
   readonly initiatorEphemeralPub: Uint8Array
@@ -81,6 +93,10 @@ export interface KeyScheduleInput {
  * Run the key schedule. Deterministic: identical inputs always yield identical
  * keys, and both peers compute the same salt because they order the ephemeral
  * public keys the same way (initiator first).
+ *
+ * Consumes its DH inputs: `input.dhEE` and `input.dhES` are zero-filled before
+ * this returns (see the module note on secret hygiene), so a caller that needs
+ * them afterwards must pass copies — no caller in this package does.
  */
 export function deriveSessionKeys(input: KeyScheduleInput): SessionKeys {
   const ikm = concatBytes(input.dhEE, input.dhES)
@@ -93,9 +109,16 @@ export function deriveSessionKeys(input: KeyScheduleInput): SessionKeys {
     ),
   )
   const okm = hkdf(sha256, ikm, salt, HKDF_INFO, OKM_BYTES)
-  return {
+  const keys = {
     keyI2R: okm.slice(0, RECORD_KEY_BYTES),
     keyR2I: okm.slice(RECORD_KEY_BYTES, RECORD_KEY_BYTES * 2),
     sessionId: okm.slice(RECORD_KEY_BYTES * 2, OKM_BYTES),
   }
+  // The output slices are copies; wipe every intermediate holding raw secret
+  // material — the DH inputs, their concatenation, and the okm master copy.
+  ikm.fill(0)
+  okm.fill(0)
+  input.dhEE.fill(0)
+  input.dhES.fill(0)
+  return keys
 }

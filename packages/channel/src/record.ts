@@ -31,6 +31,7 @@
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'
 import { sha256 } from '@noble/hashes/sha256.js'
 import { concatBytes } from '@noble/hashes/utils.js'
+import { constantTimeEqual } from './keys.js'
 
 /** Nonce length for XChaCha20-Poly1305. */
 export const NONCE_BYTES = 24
@@ -167,12 +168,13 @@ export class Opener {
   }
 }
 
-/** Compare a record's trailing Poly1305 tag against a stored one. */
+/**
+ * Compare a record's trailing Poly1305 tag against a stored one, in constant
+ * time (L1/L3): the comparison must not leak, through timing, how much of an
+ * authentic tag a probing record matched. The length check is fine to
+ * short-circuit — record lengths are public.
+ */
 function recordTagEquals(record: Uint8Array, tag: Uint8Array): boolean {
   if (record.length < TAG_BYTES) return false
-  const offset = record.length - TAG_BYTES
-  for (let i = 0; i < TAG_BYTES; i++) {
-    if (record[offset + i] !== tag[i]) return false
-  }
-  return true
+  return constantTimeEqual(record.subarray(record.length - TAG_BYTES), tag)
 }

@@ -57,10 +57,13 @@ describe('SecureChannel', () => {
     const rSid = required(responder.sessionId)
     expect(Buffer.from(iSid).equals(Buffer.from(rSid))).toBe(true)
 
+    // Protocol shape: the initiator's single pre-auth record (its negotiation
+    // frame), the responder's replies, then post-auth traffic flows freely.
     initiator.send(controlFrame(bytes('hello')))
-    initiator.send(binaryFrame(new Uint8Array([1, 2, 3])))
     responder.send(controlFrame(bytes('ack')))
     responder.send(binaryFrame(new Uint8Array([9, 8])))
+    await settle()
+    initiator.send(binaryFrame(new Uint8Array([1, 2, 3])))
     await settle()
 
     expect(atR.map((f) => f.tag)).toEqual([FrameTag.Control, FrameTag.Binary])
@@ -76,6 +79,9 @@ describe('SecureChannel', () => {
     const host = generateKeyPair()
     const { initiator, responder, atR } = connect(host.publicKey, host)
     await Promise.all([initiator.ready(), responder.ready()])
+    // authenticate the initiator first (H1: one record before that, not 50)
+    responder.send(controlFrame(bytes('go')))
+    await settle()
     for (let i = 0; i < 50; i++) initiator.send(controlFrame(bytes(`n-${i}`)))
     await settle()
     expect(atR.map((f) => text(f.payload))).toEqual(Array.from({ length: 50 }, (_, i) => `n-${i}`))
@@ -451,6 +457,54 @@ describe('SecureChannel', () => {
     responder.send(controlFrame(bytes('proof')))
     await settle()
     expect(authed).toBe(true)
+  })
+
+  // --- H1 structural: the initiator's one-record pre-auth budget -----------
+
+  it('initiator: one record before authenticated(), a second throws, post-auth flows (H1)', async () => {
+    const host = generateKeyPair()
+    const { initiator, responder, atR } = connect(host.publicKey, host)
+    await Promise.all([initiator.ready(), responder.ready()])
+    // The one pre-auth record — the negotiation frame slot.
+    initiator.send(controlFrame(bytes('hello')))
+    // A second record toward a still-unproven peer is refused by construction...
+    expect(() => initiator.send(controlFrame(bytes('too eager')))).toThrow(/authenticated/)
+    // ...and the refusal is non-fatal.
+    expect(initiator.isOpen).toBe(true)
+    // The peer proves itself (first inbound record opens) and the gate lifts.
+    responder.send(controlFrame(bytes('ack')))
+    await settle()
+    initiator.send(controlFrame(bytes('rpc')))
+    await settle()
+    expect(atR.map((f) => text(f.payload))).toEqual(['hello', 'rpc'])
+  })
+
+  it('initiator: a send rejected by the size cap does not consume the pre-auth budget', async () => {
+    const host = generateKeyPair()
+    const { initiator, responder, atR } = connect(host.publicKey, host)
+    await Promise.all([initiator.ready(), responder.ready()])
+    // Nothing was sealed, so the negotiation slot is still available.
+    expect(() => initiator.send(binaryFrame(new Uint8Array(MAX_RECORD_BYTES)))).toThrow(RangeError)
+    initiator.send(controlFrame(bytes('hello')))
+    await settle()
+    expect(atR.map((f) => text(f.payload))).toEqual(['hello'])
+    expect(responder.isOpen).toBe(true)
+  })
+
+  it('responder: sends multiple records before opening any inbound record (ungated)', async () => {
+    const host = generateKeyPair()
+    const { initiator, responder, atI } = connect(host.publicKey, host)
+    await Promise.all([initiator.ready(), responder.ready()])
+    // The initiator has sent nothing: the responder has opened no inbound
+    // record, yet may speak freely — only initiators carry the budget.
+    responder.send(controlFrame(bytes('one')))
+    responder.send(controlFrame(bytes('two')))
+    responder.send(binaryFrame(new Uint8Array([3])))
+    await settle()
+    expect(atI.map((f) => f.tag)).toEqual([FrameTag.Control, FrameTag.Control, FrameTag.Binary])
+    expect(text(required(atI[0]).payload)).toBe('one')
+    expect(text(required(atI[1]).payload)).toBe('two')
+    expect([...required(atI[2]).payload]).toEqual([3])
   })
 
   it('authenticated() rejects when the channel closes before any inbound record (wrong pin)', async () => {

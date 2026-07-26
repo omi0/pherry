@@ -311,9 +311,12 @@ describe('the P2-complete proof: a remote CLI controller reaches a docked host o
 
     const fake = makeFakeIo()
     // No sessionRef (the phone does not know it) → discovered over the relay via
-    // sessions.list; no connectCell override → the real TCP cell dial.
+    // sessions.list; no connectCell override → the real TCP cell dial. baseDir is
+    // the docked one: `dock` seeded known_hosts.json there, and S1's pin
+    // resolution refuses an unknown host on a non-TTY stdin.
     const run = runAttach({
       host: dockResult.hostId,
+      baseDir,
       apiUrl: cp.url,
       token: deviceToken,
       io: fake.io,
@@ -369,6 +372,7 @@ describe('the P2-complete proof: a remote CLI controller reaches a docked host o
     try {
       await runAttach({
         host: dockResult.hostId,
+        baseDir,
         apiUrl: cp.url,
         token: deviceToken,
         io: fake.io,

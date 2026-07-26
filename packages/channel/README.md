@@ -3,8 +3,12 @@
 The end-to-end-encrypted, forward-secret framing that carries the Pherry wire
 over **any** transport — a local pipe, a LAN socket, or an **untrusted relay**.
 Two peers complete a short handshake, then exchange authenticated records. The
-transport moves bytes; it never sees plaintext and, if it is the relay, never
-even learns which host it is relaying for.
+transport moves bytes; it never sees plaintext, and **this layer** tells it
+nothing about which host it is carrying — only ephemeral public keys and sealed
+records cross the wire. (Pherry's relay does know the `hostId` it routes by,
+and fetches that host's static **public** key from the control plane to verify
+registration — a transport-layer fact, scoped honestly in the
+[threat model](#threat-model).)
 
 This package is pure crypto and framing built on [`@noble`](https://paulmillr.com/noble/)
 primitives — X25519, HKDF-SHA256, XChaCha20-Poly1305. **It owns no sockets and
@@ -122,8 +126,17 @@ attacker echoes. The real proof is the first inbound record opening, exposed as
 `authenticated(): Promise<void>` — it resolves when that record opens and
 **rejects** (as the channel closes) when the peer lacks the pinned static. Await
 `authenticated()`, not `ready()`, when you need certainty you reached the pinned
-host. In Pherry the host's immediate session snapshot satisfies it at once, so
-the first-RPC / snapshot flow already carries the proof.
+host. In Pherry the host's `HelloAck` — its immediate reply to the controller's
+opening `Hello` — is the first inbound record, so the negotiation itself
+carries the proof.
+
+**Initiators get one record before authentication (H1, structural).** Until
+`authenticated()` resolves, an initiator's `send()` seals at most **one**
+record — its negotiation frame — and any further send throws (non-fatally; the
+channel stays usable). Application traffic toward an unproven peer is therefore
+impossible by construction, not by convention. Responders are ungated: a
+responder legitimately replies at once, and may speak first in a deployment
+without a negotiation exchange.
 
 ## Record layer
 
@@ -195,8 +208,9 @@ const initiator = new SecureChannel({ role: 'initiator', duplex, pinnedHostStati
 
 await initiator.ready() // handshake done (provisional); records may flow
 initiator.onFrame((frame) => {/* frame.tag, frame.payload */})
-initiator.send(controlFrame(bytes))
+initiator.send(controlFrame(bytes)) // the ONE pre-auth record (the negotiation frame)
 await initiator.authenticated() // first inbound record opened → pinned host proven
+// further initiator.send() calls are allowed from here on
 ```
 
 A `Duplex` is anything with `send(bytes)`, `onMessage(cb)`, and `close()`; it
@@ -219,8 +233,14 @@ authenticates the two endpoints and forwards bytes, but must never read them.
 - **Impersonate the host** — without `s_R.priv` it cannot reproduce `dh_es`, so
   its keys diverge and the first record fails. Host identity is proven, not
   asserted.
-- **Learn the host's identity** — `s_R.pub` is pinned out-of-band and never
-  crosses the wire, so the relay sees only per-session ephemeral public keys.
+- **Learn the host's identity *from the channel*** — `s_R.pub` is pinned
+  out-of-band and never crosses the wire; on the channel the relay sees only
+  per-session ephemeral public keys. **Scope this claim honestly (A3):** it is
+  a property of this layer, not of the whole system. The Pherry *relay* knows
+  exactly which `hostId` it is relaying for — it routes by it — and fetches
+  that host's static **public** key from the control plane to verify the host's
+  registration. A public key lets the relay *recognize* the host it was told
+  about; it never lets it read, forge, or impersonate.
 - **Recover past sessions** — ephemeral-only `dh_ee` gives forward secrecy;
   compromising `s_R.priv` later does not decrypt recorded traffic, and each
   session uses independent ephemerals and keys.
@@ -236,16 +256,20 @@ authenticates the two endpoints and forwards bytes, but must never read them.
   availability. In particular, a peer can pin up to ~`MAX_RECORD_BYTES` (4 MiB)
   of memory per connection by sending a large in-range length prefix and then
   stalling before the record body — the deliberate per-connection high-water
-  mark. This layer stays a pure function over a `Duplex` and adds **no** timers;
+  mark. The buffer's *bookkeeping* is bounded too: past a fixed chunk count the
+  queued fragments coalesce (amortised O(n)), so a peer dribbling a record one
+  byte at a time cannot inflate the queue into millions of tiny allocations.
+  This layer stays a pure function over a `Duplex` and adds **no** timers;
   policing idle or partial records is the relay / transport policy's job.
 - **Endpoint compromise.** If either peer's process is compromised, its live
   session keys are exposed. Forward secrecy protects *past* sessions, not a
   concurrently-compromised one. As a **best-effort** narrowing of the exposure
-  window, the channel zero-fills its ephemeral secret once the handshake derives
-  the session keys, and zero-fills the live direction keys and drops its cipher
-  references on close. This is not guaranteed erasure — JS gives no control over
-  copies the runtime or GC may retain, and it does not reach into the `@noble`
-  ciphers' internals.
+  window, the channel zero-fills every handshake intermediate once the session
+  keys derive — the ephemeral secret, both DH shared secrets, the concatenated
+  HKDF input, and the OKM master copy — and zero-fills the live direction keys
+  and drops its cipher references on close. This is not guaranteed erasure — JS
+  gives no control over copies the runtime or GC may retain, and it does not
+  reach into the `@noble` ciphers' internals.
 
 ## Develop
 

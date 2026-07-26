@@ -198,8 +198,9 @@ export class SecureChannel {
    * initiator's frames or forge one the initiator will open. The MITM is detected
    * when the first inbound record fails to authenticate (`onClose` fires). For
    * the real proof that you reached the pinned host, await {@link authenticated}
-   * (an opened inbound frame), not `ready()`; in Pherry the host's immediate
-   * session snapshot satisfies it at once.
+   * (an opened inbound frame), not `ready()`; in Pherry the host's `HelloAck` —
+   * its immediate reply to the controller's opening `Hello` — satisfies it
+   * during negotiation.
    */
   ready(): Promise<void> {
     return this.#ready
@@ -258,6 +259,17 @@ export class SecureChannel {
   /**
    * Seal a frame and write it to the duplex. Throws if not yet open or closed.
    *
+   * **Initiators get one record before authentication (H1, structural).** Until
+   * {@link authenticated} resolves — i.e. until the peer has proven it holds the
+   * pinned static by producing a record that opens — an initiator may seal
+   * exactly **one** record: its negotiation frame (in Pherry, the `Hello` that
+   * elicits the host's `HelloAck`). Any further send throws, so application
+   * traffic cannot be emitted toward an unproven peer by construction. The
+   * throw is non-fatal and the budget counts **sealed** records, so a send
+   * rejected here (or by the size cap below) does not consume it. Responders
+   * are ungated — a responder legitimately answers at once, and may speak first
+   * in a deployment without a negotiation exchange.
+   *
    * The record-size cap is enforced **symmetrically** with the receive path: if
    * the record this frame would seal (its payload plus {@link RECORD_OVERHEAD_BYTES})
    * exceeds {@link MAX_RECORD_BYTES}, `send` throws **before** sealing, rather than
@@ -267,6 +279,11 @@ export class SecureChannel {
   send(frame: ChannelFrame): void {
     if (this.#closed) throw new Error('secure channel is closed')
     if (!this.#open || !this.#sealer) throw new Error('secure channel is not open yet')
+    if (this.#role === 'initiator' && !this.#authenticated && this.#sealer.counter >= 1) {
+      throw new Error(
+        'initiator already sent its one pre-authentication record; await authenticated() before sending more',
+      )
+    }
     const recordLength = RECORD_OVERHEAD_BYTES + frame.payload.length
     if (recordLength > MAX_RECORD_BYTES) {
       throw new RangeError(`record length ${recordLength} exceeds maximum ${MAX_RECORD_BYTES}`)
