@@ -41,10 +41,14 @@ const { encodeOuterMessage } = await import(
 const { encodePtyFrame, decodePtyFrame } = await import(
   resolve(repoRoot, 'protocol/dist/pty-frame.js')
 )
+const { deviceAuthMessage, deviceKeyIdOf } = await import(
+  resolve(repoRoot, 'protocol/dist/device-auth.js')
+)
 
 // Reach @noble through pnpm's symlinks, anchored inside packages/channel.
 const channelRequire = createRequire(resolve(repoRoot, 'packages/channel/package.json'))
 const { x25519 } = channelRequire('@noble/curves/ed25519.js')
+const { p256 } = channelRequire('@noble/curves/p256.js')
 const { sha256 } = channelRequire('@noble/hashes/sha256.js')
 const { xchacha20poly1305, hchacha } = channelRequire('@noble/ciphers/chacha.js')
 
@@ -140,9 +144,11 @@ function buildHandshake() {
     const salt = sha256(
       concatAll([enc.encode('pherry/channel/v1/salt'), eIpub, eRpub, context ?? new Uint8Array(0)])
     )
+    // deriveSessionKeys CONSUMES its DH inputs (zero-fills them — S2/M2), and
+    // this builder reuses dhEE/dhES across cases: pass fresh copies each call.
     const keys = deriveSessionKeys({
-      dhEE,
-      dhES,
+      dhEE: dhEE.slice(),
+      dhES: dhES.slice(),
       initiatorEphemeralPub: eIpub,
       responderEphemeralPub: eRpub,
       ...(context !== undefined ? { context } : {}),
@@ -420,6 +426,50 @@ function buildIRTF() {
   }
 }
 
+function buildDeviceAuth() {
+  // The S3 device-auth statement: the single byte-exact cross-language contract
+  // of the leg. Fixed inputs; the signature is @noble's RFC 6979 deterministic
+  // ECDSA, so it is stable too — but CryptoKit's signing is randomized, so the
+  // Swift test VERIFIES this signature (and its own fresh one); it never
+  // re-derives these exact bytes by signing.
+  const secret = fixed32(0x51)
+  const publicKey = p256.getPublicKey(secret, false) // uncompressed SEC1, 65 bytes
+  const deviceKeyId = deviceKeyIdOf(publicKey)
+  const cases = [
+    {
+      description: 'sequential session id',
+      sessionId: fixed32(0),
+      hostId: 'host_00000000000000000000000000000001',
+    },
+    {
+      description: 'high-byte session id, short host id',
+      sessionId: fixed32(0xc0),
+      hostId: 'host_a1b2c3',
+    },
+  ].map(({ description, sessionId, hostId }) => {
+    const message = deviceAuthMessage({ sessionId, hostId, deviceKeyId })
+    const signature = p256.sign(sha256(message), secret).toCompactRawBytes() // raw r||s, 64 bytes
+    if (!p256.verify(signature, sha256(message), publicKey)) {
+      throw new Error(`device-auth self-verify failed for "${description}"`)
+    }
+    return {
+      description,
+      sessionIdHex: hex(sessionId),
+      hostId,
+      messageHex: hex(message),
+      signatureHex: hex(signature),
+    }
+  })
+  return {
+    description:
+      'device-auth v1 statement + ECDSA-P256-SHA256 signature (raw r||s); Swift verifies, never re-signs',
+    deviceSecretHex: hex(secret),
+    devicePublicKeyHex: hex(publicKey),
+    deviceKeyId,
+    cases,
+  }
+}
+
 // --- write ------------------------------------------------------------------
 
 const outDir = resolve(here, '..', 'PherryKit', 'Tests', 'PherryKitTests', 'Vectors')
@@ -434,6 +484,7 @@ const files = {
   'pty-frames.json': buildPtyFrames(),
   'outer-frames.json': buildOuterFrames(),
   'irtf.json': buildIRTF(),
+  'device-auth.json': buildDeviceAuth(),
 }
 
 for (const [name, value] of Object.entries(files)) {

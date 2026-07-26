@@ -222,11 +222,40 @@ struct PairFlowView: View {
                 .font(.callout)
                 .foregroundStyle(Theme.muted)
                 .multilineTextAlignment(.center)
+            fingerprintCard
             Button("Done") { finish() }
                 .buttonStyle(PherryButtonStyle())
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The S3 safety number: the host's `pherry dock` ceremony prints the same fingerprint and
+    /// asks the user to compare before authorizing this device — the control plane only carried
+    /// the key, so a substituted one shows up as two screens that disagree.
+    private var fingerprintCard: some View {
+        VStack(spacing: 8) {
+            Text("This device's fingerprint")
+                .font(.footnote)
+                .foregroundStyle(Theme.muted)
+            Text(model.deviceIdentity.fingerprint)
+                .font(.mono(17, weight: .semibold))
+                .foregroundStyle(Theme.text)
+            Text("Approve the dock on the host only if it shows this exact fingerprint.")
+                .font(.footnote)
+                .foregroundStyle(Theme.muted)
+                .multilineTextAlignment(.center)
+            if !model.deviceIdentity.secureEnclaveBacked {
+                Label("Software key — this device has no Secure Enclave (Simulator).",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.muted)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusSmall))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusSmall).strokeBorder(Theme.border))
     }
 
     private func failedStep(_ message: String) -> some View {

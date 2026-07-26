@@ -46,6 +46,7 @@ import { connectUnix } from '@pherry/transport-node'
 import { connectCell } from '../cell-url.js'
 import { ControlPlaneClient } from '../control-plane-client.js'
 import { connectDaemon } from '../daemon/client.js'
+import { deviceSignerFor, loadOrCreateDeviceKey } from '../device-key.js'
 import { readDockConfig } from '../dock-config.js'
 import { readHostPublicKey } from '../host-key.js'
 import {
@@ -230,6 +231,12 @@ async function attachRemoteHost(
   }
   const { ticket, cellUrl } = minted
 
+  // This machine's device identity (S3): every remote steer signs the
+  // device-auth statement, and the host verifies it against its keyring. The
+  // key is loaded (or created) before dialing so a key failure cannot burn the
+  // one-time ticket.
+  const deviceKey = await loadOrCreateDeviceKey(options.baseDir)
+
   const dial = options.connectCell ?? connectCell
   const duplex = await connectViaCell({ connect: () => dial(cellUrl), ticket })
   const channel = new SecureChannel({
@@ -238,7 +245,10 @@ async function attachRemoteHost(
     pinnedHostStatic: pin.key,
     context: relayChannelContext(host, ticket),
   })
-  const controller = new Controller(channel)
+  const controller = new Controller(channel, {
+    hostId: host,
+    deviceSigner: deviceSignerFor(deviceKey),
+  })
 
   const mirror = (async (): Promise<TerminalClientResult> => {
     await channel.ready()

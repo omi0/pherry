@@ -59,7 +59,8 @@ final class TerminalSession {
                 apiUrl: apiUrl,
                 deviceToken: token,
                 hostId: target.hostId,
-                pinnedHostStatic: pin
+                pinnedHostStatic: pin,
+                deviceSigner: model.deviceIdentity
             )
             self.connection = connection
             let (cols, rows) = terminal.size

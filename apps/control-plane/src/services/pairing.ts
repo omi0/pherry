@@ -92,6 +92,11 @@ export interface RedeemPairTokenResult {
  * token), `redeemed_device_id` is stamped for the audit trail, and the minting
  * user's IdP sign-in token is requested (may be `null` when the IdP is unconfigured).
  *
+ * `opts.devicePublicKeyB64` is the device's P-256 identity public key, stored on the
+ * new device row verbatim — the control plane only ever **carries** it (a substituted
+ * key diverges the fingerprints the host and phone display); `undefined` leaves the
+ * column null.
+ *
  * `config` is required for the director URL echoed back to the phone; `identity`
  * mints the sign-in token. Idempotency and TTL are enforced by the atomic claim,
  * so this is safe to call concurrently.
@@ -101,7 +106,11 @@ export async function redeemPairToken(
   identity: IdentityProvider,
   config: Config,
   now: number,
-  opts: { pairToken: string; deviceName: string | undefined },
+  opts: {
+    pairToken: string
+    deviceName: string | undefined
+    devicePublicKeyB64: string | undefined
+  },
 ): Promise<RedeemPairTokenResult | null> {
   const nowDate = new Date(now)
   const claimed = await db
@@ -128,6 +137,7 @@ export async function redeemPairToken(
       name: opts.deviceName ?? 'device',
       deviceTokenHash: secret.hash,
       deviceTokenPrefix: secret.prefix,
+      devicePublicKey: opts.devicePublicKeyB64 ?? null,
     })
     .returning()
   const device = deviceRows[0]
@@ -160,17 +170,36 @@ export async function redeemPairToken(
 /** The lifecycle of a pair token, or `null` when the token is unknown. */
 export type PairTokenStatus = 'pending' | 'redeemed' | 'expired'
 
+/** A pair token's reported lifecycle plus, once redeemed, the claiming device's identity. */
+export interface PairTokenStatusResult {
+  /** The token's lifecycle stage. */
+  readonly status: PairTokenStatus
+  /**
+   * The redeeming device's display name and P-256 identity public key (uncompressed
+   * SEC1, base64) — what `dock` renders as the fingerprint the user compares against
+   * the phone's. **Present only when `status` is `redeemed`** (absent while pending/
+   * expired); `null` inside a redeemed result only if the device row cannot be
+   * resolved, and each field `null` when the phone never sent it.
+   */
+  readonly device?: {
+    readonly name: string | null
+    readonly publicKeyB64: string | null
+  } | null
+}
+
 /**
  * Report a pair token's status by hash — `pending`, `redeemed`, or `expired` — or
  * `null` when it is unknown. `redeemed` takes precedence over `expired`: a token
  * that was claimed and has since passed its TTL still reads `redeemed`, since the
- * redemption is the terminal, audited fact.
+ * redemption is the terminal, audited fact. A redeemed result also carries the
+ * claiming device's name + identity public key (see {@link PairTokenStatusResult});
+ * the refusal stays a single undifferentiated `null` — unknown tokens learn nothing.
  */
 export async function pairTokenStatus(
   db: Db,
   now: number,
   pairToken: string,
-): Promise<PairTokenStatus | null> {
+): Promise<PairTokenStatusResult | null> {
   const rows = await db
     .select()
     .from(pairTokens)
@@ -178,7 +207,21 @@ export async function pairTokenStatus(
     .limit(1)
   const row = rows[0]
   if (row === undefined) return null
-  if (row.redeemedAt !== null) return 'redeemed'
-  if (row.expiresAt.getTime() <= now) return 'expired'
-  return 'pending'
+  if (row.redeemedAt !== null) {
+    let device: PairTokenStatusResult['device'] = null
+    if (row.redeemedDeviceId !== null) {
+      const deviceRows = await db
+        .select()
+        .from(devices)
+        .where(eq(devices.id, row.redeemedDeviceId))
+        .limit(1)
+      const deviceRow = deviceRows[0]
+      if (deviceRow !== undefined) {
+        device = { name: deviceRow.name, publicKeyB64: deviceRow.devicePublicKey }
+      }
+    }
+    return { status: 'redeemed', device }
+  }
+  if (row.expiresAt.getTime() <= now) return { status: 'expired' }
+  return { status: 'pending' }
 }

@@ -20,7 +20,12 @@
 
 // The controller client
 export { Controller, RpcClientError } from './controller.js'
-export type { SubscribeOptions, Subscription } from './controller.js'
+export type {
+  ControllerOptions,
+  DeviceSigner,
+  SubscribeOptions,
+  Subscription,
+} from './controller.js'
 
 // Decoded PTY events
 export { PtyEventStream } from './events.js'

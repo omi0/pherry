@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { negotiate } from './capabilities.js'
+import { DEVICE_KEY_ID_PATTERN } from './device-auth.js'
 import { Base64 } from './schemas/primitives.js'
 import { evaluateCompat } from './version.js'
 import type { CompatResult } from './version.js'
@@ -8,12 +9,22 @@ import type { CompatResult } from './version.js'
 export const Role = z.enum(['host', 'controller'])
 export type Role = z.infer<typeof Role>
 
-/** The opening frame each peer sends: who it is and what it can do. */
+/**
+ * The opening frame each peer sends: who it is, what it can do, and — since
+ * protocol 2 — *which enrolled device* it is (`deviceKeyId` + `deviceAuth`,
+ * the signed statement of `device-auth.ts`). The device fields are **required,
+ * not optional** — an optional field would be a downgrade oracle a stripping
+ * MITM could exploit. A controller with no device identity (the local
+ * unix-socket path) sends the canonical null claim instead
+ * (`NULL_DEVICE_KEY_ID` / `NULL_DEVICE_AUTH`).
+ */
 export const Hello = z.object({
   role: Role,
   protocol: z.number().int(),
   capabilities: z.array(z.string()),
   publicKey: Base64,
+  deviceKeyId: z.string().regex(DEVICE_KEY_ID_PATTERN),
+  deviceAuth: Base64,
 })
 export type Hello = z.infer<typeof Hello>
 

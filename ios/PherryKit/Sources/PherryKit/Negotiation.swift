@@ -9,9 +9,15 @@ import Foundation
 /// the frame codec; `ControllerClient` drives the exchange and fails closed on skew.
 enum PherryProtocol {
     /// The protocol version this build speaks.
-    static let version = 1
+    ///
+    /// **2** (S3): the auth handshake changed — `Hello` gained the required `deviceKeyId` /
+    /// `deviceAuth` device-identity fields. A changed auth handshake is a named bump trigger
+    /// in the reference `version.ts`, and nothing is deployed to real users, so this was a
+    /// hard cutover: ``minCompatibleVersion`` moved with it and every first-party peer
+    /// upgraded in the same leg (M22's fail-closed machinery rejects any un-upgraded peer).
+    static let version = 2
     /// The oldest peer version this build can still interoperate with.
-    static let minCompatibleVersion = 1
+    static let minCompatibleVersion = 2
 
     /// The mirror-and-steer capabilities this controller advertises by default: it streams
     /// the PTY mirror (`pty.stream.v1`) with an initial snapshot (`mirror.snapshot.v1`) and
@@ -47,10 +53,18 @@ struct HelloAck: Equatable {
 /// The `Hello` / `HelloAck` control-frame codec — JSON inside a control frame, the same
 /// envelope as the RPC codec (``Rpc``).
 enum HandshakeCodec {
-    /// Encode the controller `Hello`: `{ role, protocol, capabilities, publicKey }`.
+    /// Encode the controller `Hello`:
+    /// `{ role, protocol, capabilities, publicKey, deviceKeyId, deviceAuth }`.
+    ///
+    /// The S3 device-identity fields are **required, not optional** — an optional field would
+    /// be a downgrade oracle a stripping MITM could exploit. A signerless controller sends the
+    /// canonical null claim (``DeviceAuth/nullDeviceKeyId`` / ``DeviceAuth/nullDeviceAuth``),
+    /// never an absent field.
     static func encodeHello(
         capabilities: [String],
         publicKey: String,
+        deviceKeyId: String,
+        deviceAuth: String,
         protocolVersion: Int = PherryProtocol.version
     ) throws -> Data {
         let object: [String: Any] = [
@@ -58,6 +72,8 @@ enum HandshakeCodec {
             "protocol": protocolVersion,
             "capabilities": capabilities,
             "publicKey": publicKey,
+            "deviceKeyId": deviceKeyId,
+            "deviceAuth": deviceAuth,
         ]
         return try JSONSerialization.data(withJSONObject: object)
     }

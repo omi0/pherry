@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import PherryKit
@@ -93,6 +94,63 @@ final class ControllerClientTests: XCTestCase {
         await client.close()
     }
 
+    /// S3: a controller with an injected ``DeviceSigner`` sends a protocol-2 `Hello` whose
+    /// `deviceAuth` verifies over the statement rebuilt from the *host's own* session id and
+    /// the dialed host id — the exact check a device-gating host performs. Verification, not
+    /// re-signing, is the assertion (ECDSA-P256 signatures are randomized).
+    func testHelloCarriesVerifiableDeviceAuth() async throws {
+        let (t1, t2) = MemoryTransport.pair()
+        let host = X25519.generate()
+        let initiator = SecureChannel(role: .initiator(pinnedHostStatic: host.publicKey), transport: t1, context: nil)
+        let responder = SecureChannel(role: .responder(staticSecretKey: host.secret), transport: t2, context: nil)
+        let signer = SoftwareDeviceSigner()
+        let hostId = "host_00000000000000000000000000000001"
+        let client = ControllerClient(
+            channel: initiator,
+            deviceAuth: DeviceAuthContext(hostId: hostId, signer: signer)
+        )
+        let scriptedHost = ScriptedHost(channel: responder, sessionRef: sessionRef)
+        _ = try await client.listSessions() // forces the negotiation to have completed
+
+        let hello = try XCTUnwrap(scriptedHost.hello())
+        XCTAssertEqual((hello["protocol"] as? NSNumber)?.intValue, PherryProtocol.version)
+        XCTAssertEqual(hello["deviceKeyId"] as? String, signer.deviceKeyId)
+
+        // Rebuild the statement from the responder channel's own session id (never
+        // transmitted — both ends derive it) and verify the claimed signature over it.
+        let responderSessionId = await responder.sessionId
+        let sessionId = try XCTUnwrap(responderSessionId)
+        let message = try DeviceAuth.message(
+            sessionId: sessionId, hostId: hostId, deviceKeyId: signer.deviceKeyId
+        )
+        let signatureData = try XCTUnwrap(
+            Data(base64Encoded: try XCTUnwrap(hello["deviceAuth"] as? String))
+        )
+        XCTAssertEqual(signatureData.count, DeviceAuth.signatureBytes)
+        let verifier = try P256.Signing.PublicKey(x963Representation: signer.publicKey)
+        let signature = try P256.Signing.ECDSASignature(rawRepresentation: signatureData)
+        XCTAssertTrue(verifier.isValidSignature(signature, for: message))
+        // A different host id's statement must not verify — the binding is load-bearing.
+        let other = try DeviceAuth.message(
+            sessionId: sessionId, hostId: "host_someoneelse", deviceKeyId: signer.deviceKeyId
+        )
+        XCTAssertFalse(verifier.isValidSignature(signature, for: other))
+        await client.close()
+    }
+
+    /// S3: a signerless controller sends the canonical null claim — the device fields are
+    /// always present, never absent (no downgrade oracle). iOS always injects a signer; this
+    /// path exists for codec uniformity with the reference wire and is asserted so it stays
+    /// canonical.
+    func testSignerlessHelloSendsNullClaim() async throws {
+        let (client, scriptedHost) = await makePair()
+        _ = try await client.listSessions()
+        let hello = try XCTUnwrap(scriptedHost.hello())
+        XCTAssertEqual(hello["deviceKeyId"] as? String, DeviceAuth.nullDeviceKeyId)
+        XCTAssertEqual(hello["deviceAuth"] as? String, Data(count: 64).base64EncodedString())
+        await client.close()
+    }
+
     /// M22-1: a host that completes the Noise handshake but withholds its `HelloAck` — without
     /// closing the channel — must not hang every RPC. The bounded negotiation window fires: the
     /// pending request fails closed with the `UNAVAILABLE` handshake timeout, and the controller
@@ -128,6 +186,29 @@ final class ControllerClientTests: XCTestCase {
     }
 }
 
+/// A software-P256 ``DeviceSigner`` double — no Secure Enclave in CI, the same discipline as
+/// every other external seam. Holds the raw scalar (test-only material) and rebuilds the key
+/// per signature so the double stays trivially `Sendable`.
+struct SoftwareDeviceSigner: DeviceSigner {
+    private let keyData: Data
+    /// The uncompressed SEC1 public key (65 bytes) — what a host keyring would hold.
+    let publicKey: Data
+    let deviceKeyId: String
+
+    init() {
+        let key = P256.Signing.PrivateKey()
+        self.keyData = key.rawRepresentation
+        self.publicKey = key.publicKey.x963Representation
+        self.deviceKeyId = (try? DeviceAuth.keyId(publicKey: key.publicKey.x963Representation)) ?? ""
+    }
+
+    func sign(message: Data) async throws -> Data {
+        try P256.Signing.PrivateKey(rawRepresentation: keyData)
+            .signature(for: message)
+            .rawRepresentation
+    }
+}
+
 /// A minimal scripted host over a responder ``SecureChannel``: it answers `sessions.list`,
 /// `session.subscribe` (ack → snapshot → output → ended), and `session.input` / `session.resize`,
 /// and records every request for assertions.
@@ -138,6 +219,7 @@ final class ScriptedHost: @unchecked Sendable {
     private let streamId: UInt32 = 42
     private let lock = NSLock()
     private var requests: [(method: String, params: [String: Any])] = []
+    private var helloObject: [String: Any]?
 
     init(channel: SecureChannel, sessionRef: String, helloAckProtocol: Int = PherryProtocol.version) {
         self.channel = channel
@@ -152,9 +234,21 @@ final class ScriptedHost: @unchecked Sendable {
         return requests.last { $0.method == method }?.params
     }
 
+    /// The controller's opening `Hello` exactly as received, if any — what a device-gating
+    /// host would inspect.
+    func hello() -> [String: Any]? {
+        lock.lock(); defer { lock.unlock() }
+        return helloObject
+    }
+
     private func record(_ method: String, _ params: [String: Any]) {
         lock.lock(); defer { lock.unlock() }
         requests.append((method, params))
+    }
+
+    private func recordHello(_ object: [String: Any]) {
+        lock.lock(); defer { lock.unlock() }
+        helloObject = object
     }
 
     private func run() async {
@@ -173,8 +267,9 @@ final class ScriptedHost: @unchecked Sendable {
             frame.tag == .control,
             let object = try? JSONSerialization.jsonObject(with: frame.payload) as? [String: Any]
         else { return }
-        // The controller's opening Hello (leg-M22): answer HelloAck, then serve RPC.
+        // The controller's opening Hello (leg-M22): record it, answer HelloAck, then serve RPC.
         if object["role"] is String {
+            recordHello(object)
             await sendControl([
                 "protocol": helloAckProtocol,
                 "capabilities": PherryProtocol.controllerCapabilities,

@@ -39,6 +39,7 @@ export type { OpenSessionOptions } from './session/spawn.js'
 export { serveConnection } from './serve/serve-connection.js'
 export type {
   CustodyHooks,
+  DeviceAuthClaim,
   ServeConnectionOptions,
   ServedConnection,
 } from './serve/serve-connection.js'

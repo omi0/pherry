@@ -61,11 +61,17 @@ struct HostConnection: Sendable {
     /// letting the control plane supply the pin would let it hand us a key it holds the private half
     /// of, making it a full man-in-the-middle on content, which is exactly what the E2EE channel
     /// exists to prevent (S1). A host this phone has not docked is not reachable; dock it first.
+    ///
+    /// `deviceSigner` is the phone's device identity (S3), also required — this phone always has
+    /// one, so it never sends the null claim. It signs the statement binding the channel's session
+    /// id and `hostId` into the `Hello`; a device-gated host that does not hold this key in its
+    /// keyring closes without serving a single RPC.
     static func connect(
         apiUrl: URL,
         deviceToken: String,
         hostId: String,
-        pinnedHostStatic: Data
+        pinnedHostStatic: Data,
+        deviceSigner: any DeviceSigner
     ) async throws -> HostConnection {
         let client = ControlPlaneClient(apiUrl: apiUrl)
 
@@ -116,7 +122,10 @@ struct HostConnection: Sendable {
             context: RelayContext.channelContext(hostId: hostId, ticket: ticket.ticket)
         )
         await channel.start()
-        let controller = ControllerClient(channel: channel)
+        let controller = ControllerClient(
+            channel: channel,
+            deviceAuth: DeviceAuthContext(hostId: hostId, signer: deviceSigner)
+        )
 
         // 5. Race the first RPC against the auth deadline. `listSessions` prompts the host's first
         //    record, which is what proves the pin; if it never comes, the watchdog closes the

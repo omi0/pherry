@@ -27,7 +27,10 @@ final class ControlPlaneClientTests: XCTestCase {
             "host": ["id": "host_1", "staticPublicKeyB64": keyB64],
             "directorUrl": "https://director.example",
         ])
-        let result = try await makeClient().redeemPair(pairToken: "pt_abc", deviceName: "iPhone")
+        let devicePublicKeyB64 = Data(repeating: 0x04, count: 65).base64EncodedString()
+        let result = try await makeClient().redeemPair(
+            pairToken: "pt_abc", deviceName: "iPhone", devicePublicKeyB64: devicePublicKeyB64
+        )
 
         XCTAssertEqual(result.deviceToken, "dt_new")
         XCTAssertNil(result.signInToken)
@@ -42,6 +45,24 @@ final class ControlPlaneClientTests: XCTestCase {
         let body = URLProtocolStub.lastBodyJSON()
         XCTAssertEqual(body?["pairToken"] as? String, "pt_abc")
         XCTAssertEqual(body?["deviceName"] as? String, "iPhone")
+        // S3: the device's enrollment public key rides along.
+        XCTAssertEqual(body?["devicePublicKeyB64"] as? String, devicePublicKeyB64)
+    }
+
+    /// A `nil` device key is omitted from the body entirely (the server treats it as optional),
+    /// never sent as null.
+    func testRedeemPairOmitsAbsentDeviceKey() async throws {
+        let keyB64 = Data(repeating: 0x2a, count: 32).base64EncodedString()
+        URLProtocolStub.respond(status: 200, json: [
+            "deviceToken": "dt_new",
+            "host": ["id": "host_1", "staticPublicKeyB64": keyB64],
+        ])
+        _ = try await makeClient().redeemPair(
+            pairToken: "pt_abc", deviceName: nil, devicePublicKeyB64: nil
+        )
+        let body = URLProtocolStub.lastBodyJSON()
+        XCTAssertNil(body?["devicePublicKeyB64"])
+        XCTAssertNil(body?["deviceName"])
     }
 
     func testRelayTicketSendsBearer() async throws {

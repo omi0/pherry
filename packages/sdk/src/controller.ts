@@ -36,6 +36,8 @@ import {
   METHODS,
   MIRROR_SNAPSHOT,
   type MethodName,
+  NULL_DEVICE_AUTH,
+  NULL_DEVICE_KEY_ID,
   PROTOCOL_VERSION,
   PTY_STREAM,
   type ParamsOf,
@@ -46,6 +48,7 @@ import {
   type SessionRef,
   StreamId,
   decodePtyFrame,
+  deviceAuthMessage,
   negotiateHello,
   newRequestId,
   requiredCapability,
@@ -112,6 +115,19 @@ const DEFAULT_CONTROLLER_CAPABILITIES: readonly string[] = [
 /** Default bounded window (ms) to await the host's HelloAck before failing closed. */
 const DEFAULT_NEGOTIATION_TIMEOUT_MS = 10_000
 
+/**
+ * Signs the device-auth statement a controller carries in its {@link Hello}
+ * (S3). The key is owned by the caller — a CLI file key, the iOS Secure
+ * Enclave — and only the signature crosses this seam; the Controller never
+ * sees key material.
+ */
+export interface DeviceSigner {
+  /** The signing device's key id (16 lowercase hex — `deviceKeyIdOf`). */
+  readonly deviceKeyId: string
+  /** ECDSA-P256-SHA256 over the statement bytes; returns raw `r‖s` (64 bytes). */
+  sign(message: Uint8Array): Uint8Array | Promise<Uint8Array>
+}
+
 /** Construction options for a {@link Controller}. */
 export interface ControllerOptions {
   /**
@@ -125,6 +141,21 @@ export interface ControllerOptions {
    * closed. Default {@link DEFAULT_NEGOTIATION_TIMEOUT_MS}.
    */
   negotiationTimeoutMs?: number
+  /**
+   * Device identity (S3). **Required whenever the controller dials over the
+   * relay** — the host's device gate refuses a Hello it cannot verify. The
+   * local unix-socket path passes none: the Hello then carries the canonical
+   * null claim (`NULL_DEVICE_KEY_ID` / `NULL_DEVICE_AUTH`), which an ungated
+   * host ignores and a gated host refuses. Requires {@link hostId} — the
+   * signed statement binds the dialed host.
+   */
+  deviceSigner?: DeviceSigner
+  /**
+   * The host id this controller dialed, bound into the signed device-auth
+   * statement so a claim replayed toward any other host fails verification.
+   * Required with {@link deviceSigner}; meaningless (and omitted) without it.
+   */
+  hostId?: string
 }
 
 export class Controller {
@@ -138,15 +169,25 @@ export class Controller {
   readonly #capabilities: readonly string[]
   readonly #negotiationTimeoutMs: number
   readonly #negotiated: Promise<HandshakeOutcome>
+  // Device identity (S3): present → the Hello carries a signed statement.
+  readonly #deviceSigner: DeviceSigner | undefined
+  readonly #hostId: string | undefined
   #awaitingHelloAck = false
   #resolveHelloAck: ((ack: HelloAck) => void) | undefined
   #rejectHelloAck: ((error: Error) => void) | undefined
   #negotiationTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(channel: SecureChannel, options: ControllerOptions = {}) {
+    if (options.deviceSigner && options.hostId === undefined) {
+      throw new Error(
+        'ControllerOptions: deviceSigner requires hostId — the signed statement binds the dialed host',
+      )
+    }
     this.#channel = channel
     this.#capabilities = options.capabilities ?? DEFAULT_CONTROLLER_CAPABILITIES
     this.#negotiationTimeoutMs = options.negotiationTimeoutMs ?? DEFAULT_NEGOTIATION_TIMEOUT_MS
+    this.#deviceSigner = options.deviceSigner
+    this.#hostId = options.hostId
     channel.onFrame((frame) => this.#onFrame(frame))
     channel.onClose((error) => this.#onClose(error))
     // Eagerly negotiate so Hello is the first control frame we emit; every request
@@ -230,20 +271,39 @@ export class Controller {
   // --- Internals -----------------------------------------------------------
 
   /**
-   * Drive the capability handshake: await the channel open, send `Hello` as the
-   * first control frame, await `HelloAck` (bounded by {@link #negotiationTimeoutMs}),
-   * then run {@link negotiateHello}. Rejects — failing every request closed — on an
-   * incompatible protocol version or a handshake timeout.
+   * Drive the capability handshake: await the channel open, sign the device-auth
+   * statement (S3) when a signer is configured, send `Hello` as the first control
+   * frame, await `HelloAck` (bounded by {@link #negotiationTimeoutMs}), then run
+   * {@link negotiateHello}. Rejects — failing every request closed — on an
+   * incompatible protocol version, a signer failure, or a handshake timeout.
    */
   async #negotiate(): Promise<HandshakeOutcome> {
     await this.#channel.ready()
     const sessionId = this.#channel.sessionId
+    // Device identity: a signed statement over (sessionId, hostId, deviceKeyId),
+    // or the canonical null claim when this controller carries no identity (the
+    // local unix-socket path — the host does not gate it there).
+    let deviceKeyId = NULL_DEVICE_KEY_ID
+    let deviceAuth = NULL_DEVICE_AUTH
+    if (this.#deviceSigner && this.#hostId !== undefined) {
+      if (!sessionId) throw new Error('device auth: channel has no session id after ready()')
+      const message = deviceAuthMessage({
+        sessionId,
+        hostId: this.#hostId,
+        deviceKeyId: this.#deviceSigner.deviceKeyId,
+      })
+      const signature = await this.#deviceSigner.sign(message)
+      deviceKeyId = this.#deviceSigner.deviceKeyId
+      deviceAuth = Buffer.from(signature).toString('base64')
+    }
     const local: Hello = {
       role: 'controller',
       protocol: PROTOCOL_VERSION,
       capabilities: [...this.#capabilities],
       // Advisory channel-binding: the base64 channel session id (see leg-M22).
       publicKey: sessionId ? Buffer.from(sessionId).toString('base64') : '',
+      deviceKeyId,
+      deviceAuth,
     }
     const ackPromise = new Promise<HelloAck>((resolve, reject) => {
       this.#resolveHelloAck = resolve

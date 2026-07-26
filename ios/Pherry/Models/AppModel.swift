@@ -40,6 +40,10 @@ final class AppModel {
     let push: PushRegistrar
     /// CallKit ring handling.
     let calls: CallManager
+    /// The phone's long-lived signing identity (S3) — created on first launch, Secure
+    /// Enclave-backed wherever one exists. Its public half rides along on `redeem` and its
+    /// signature inside every `Hello` is what a device-gated host verifies.
+    let deviceIdentity: DeviceIdentity
 
     // MARK: Navigation intents (SwiftUI binds to these)
 
@@ -63,6 +67,7 @@ final class AppModel {
         self.attention = AttentionStore()
         self.push = PushRegistrar()
         self.calls = CallManager()
+        self.deviceIdentity = DeviceIdentity.loadOrCreate(keychain: keychain)
         load()
         // Answering a ring opens the session and acks the event (decline leaves it pending).
         calls.onAnswer = { [weak self] call in
@@ -104,7 +109,13 @@ final class AppModel {
     func redeem(link: PairLink, apiUrl: URL, deviceName: String?, allowRepin: Bool = false) async throws {
         guard PairPolicy.allowsApiUrl(apiUrl) else { throw PairRefusal.insecureApiUrl }
         let client = ControlPlaneClient(apiUrl: apiUrl)
-        let result = try await client.redeemPair(pairToken: link.pairToken, deviceName: deviceName)
+        let result = try await client.redeemPair(
+            pairToken: link.pairToken,
+            deviceName: deviceName,
+            // S3 enrollment: the control plane carries this key to the host's dock ceremony;
+            // the fingerprint the user compares on both screens keeps the carrier honest.
+            devicePublicKeyB64: deviceIdentity.devicePublicKeyB64
+        )
         // The scanned link is the trust ceremony: the control plane may only confirm the host the
         // user scanned, never substitute another (which would re-pin that host's key below).
         guard result.hostId == link.hostId else { throw PairRefusal.hostMismatch }

@@ -35,10 +35,18 @@ public struct ControlPlaneClient: Sendable {
         public let directorUrl: String?
     }
 
-    /// Redeem a pair token (unauthenticated, one-time). `deviceName` is an optional display name.
-    public func redeemPair(pairToken: String, deviceName: String?) async throws -> PairRedeemResult {
+    /// Redeem a pair token (unauthenticated, one-time). `deviceName` is an optional display
+    /// name; `devicePublicKeyB64` is the device's uncompressed SEC1 P-256 public key (S3) —
+    /// the control plane only *carries* it to the host's dock ceremony, where the fingerprint
+    /// the user compares is what keeps the carrier honest.
+    public func redeemPair(
+        pairToken: String,
+        deviceName: String?,
+        devicePublicKeyB64: String?
+    ) async throws -> PairRedeemResult {
         var body: [String: Any] = ["pairToken": pairToken]
         if let deviceName { body["deviceName"] = deviceName }
+        if let devicePublicKeyB64 { body["devicePublicKeyB64"] = devicePublicKeyB64 }
         let (data, status) = try await perform(method: "POST", path: "/v1/pair/redeem", token: nil, body: body)
         let json = try object(data, status)
         guard

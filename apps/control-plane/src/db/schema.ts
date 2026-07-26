@@ -88,6 +88,13 @@ export const devices = pgTable('devices', {
   pushToken: text('push_token'),
   /** The PushKit VoIP push token (the ring channel); `null` until the phone registers it. */
   voipPushToken: text('voip_push_token'),
+  /**
+   * The device's P-256 identity public key (uncompressed SEC1, base64), carried at
+   * pair-redeem time; `null` for a device that predates device identity. The control
+   * plane is enrollment **transport**, never an authority — if it substituted a key,
+   * the fingerprints the host and phone display would diverge.
+   */
+  devicePublicKey: text('device_public_key'),
   lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),
   revokedAt: timestamp('revoked_at', { withTimezone: true }),
   ...timestamps,

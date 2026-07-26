@@ -180,7 +180,13 @@ and the console loads (org "Dev"). Now the flows:
 - **Dock via the browser** — `pherry dock --api http://127.0.0.1:3000` opens the
   browser; the control plane 302s to the dashboard's approval page; click
   **Approve** and the page hands the one-time code back to the CLI's loopback —
-  the terminal finishes docking and prints the pairing QR.
+  the terminal finishes docking and prints the pairing QR. It then **waits for
+  the phone to scan** (S3): once the phone redeems, the terminal shows the
+  device's fingerprint (`8F2A-91C3-4D7E-0B55`-style) and asks `Dock "…"? [y/N]`
+  — compare it against the fingerprint on the phone's pairing screen before
+  answering `y`; that comparison is what keeps the control plane out of the
+  trust loop. `--no-wait` (or Ctrl-C) skips the wait — the phone can still
+  pair, but it cannot steer this host until it is enrolled.
 - **Attention** — raise one (`pherry attention raise --kind asks --summary
   "ship it?" --question "deploy now?" --option yes --option no`, or curl the
   daemon's hook port) and it appears in the **Attention** inbox within ~4s;
@@ -327,6 +333,11 @@ dashboard's **Pair phone** modal), pair the app:
   into the app: **Hosts → Dock a host → Paste a link instead**.
 - If the link carries no `&api=…` (older `dock` output), the app asks for the control-plane URL
   once and remembers it — use `http://127.0.0.1:3000` for the local stack.
+- **Enrollment (S3):** after redeeming, the app's pairing success card shows a device
+  **fingerprint**, and the `pherry dock` terminal (still waiting) shows one too — confirm they
+  match and answer `y` in the terminal. Until that `y`, the phone can browse but the host refuses
+  its steering (`device not authorized` in the daemon's local log). On the Simulator the identity
+  key is a software key (no Secure Enclave) and the app labels it as such.
 
 Then **Hosts → the host → a session → the terminal**: the same `sessions.list` / `subscribe` /
 `input` / `resize` wire as `pherry attach`, rendered in SwiftTerm. Raise an attention event

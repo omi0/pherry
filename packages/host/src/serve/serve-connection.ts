@@ -117,6 +117,29 @@ export interface CustodyHooks {
   claim(sessionRef: SessionRef): Promise<void>
 }
 
+/**
+ * A controller's device-auth claim, extracted from its `Hello` (S3). The
+ * verifier rebuilds the signed statement from its own `sessionId` and its own
+ * host id, so a captured claim is worthless on any other channel.
+ */
+export interface DeviceAuthClaim {
+  /** The claimed device key id (16 lowercase hex chars). */
+  readonly deviceKeyId: string
+  /** The base64 raw `r‖s` ECDSA-P256 signature over the device-auth statement. */
+  readonly deviceAuth: string
+  /** This channel's 32-byte session id — what the statement must bind. */
+  readonly sessionId: Uint8Array
+}
+
+/**
+ * Bound on control frames buffered while an async {@link
+ * ServeConnectionOptions.verifyDevice} is in flight. The HelloAck is already
+ * out when verification runs, so a fast legitimate controller can have RPCs on
+ * the wire; they are held and replayed on success. A peer that floods past the
+ * bound before verification resolves is failed closed.
+ */
+const MAX_FRAMES_WHILE_VERIFYING = 64
+
 /** Optional hooks for a served connection. */
 export interface ServeConnectionOptions {
   /**
@@ -149,6 +172,17 @@ export interface ServeConnectionOptions {
    * the host closes the channel. Default {@link DEFAULT_NEGOTIATION_TIMEOUT_MS}.
    */
   negotiationTimeoutMs?: number
+  /**
+   * Verify a controller's device-auth claim (S3). **Presence enables the
+   * gate** — the same seam pattern as {@link custody} / {@link listSessions}:
+   * when present, the connection REQUIRES a valid claim and a `false` /
+   * throw fails it closed (undifferentiated on the wire, `device not
+   * authorized` in {@link onError}); when absent there is no device gate (the
+   * local unix-socket path, already trust-by-filesystem at 0600). May be
+   * async; RPC frames arriving while it runs are buffered (bounded) and
+   * replayed on success.
+   */
+  verifyDevice?: (claim: DeviceAuthClaim) => boolean | Promise<boolean>
 }
 
 /** Handle to a served connection: introspect its subscriptions and tear it down. */
@@ -187,12 +221,16 @@ export function serveConnection(
   let closed = false
 
   const servedCapabilities = options.capabilities ?? DEFAULT_SERVED_CAPABILITIES
-  // Negotiation phase (leg-M22). The first control frame MUST be a Hello; until it
-  // arrives we serve no RPC. A compatible Hello moves us to `serving` holding the
-  // negotiated capability set; an incompatible version, a wrong first frame, a
-  // silent peer, or connection close moves us to `dead` (serve nothing).
-  let phase: 'awaiting-hello' | 'serving' | 'dead' = 'awaiting-hello'
+  // Negotiation phase (leg-M22, extended by S3). The first control frame MUST be
+  // a Hello; until it arrives we serve no RPC. A compatible Hello either moves us
+  // straight to `serving`, or — when a device gate is configured and its verdict
+  // is async — through `verifying`, during which inbound control frames are
+  // buffered (bounded) and replayed once the device proves out. An incompatible
+  // version, a wrong first frame, a refused device, a silent peer, or connection
+  // close moves us to `dead` (serve nothing).
+  let phase: 'awaiting-hello' | 'verifying' | 'serving' | 'dead' = 'awaiting-hello'
   let negotiated = new Set<string>()
+  const bufferedWhileVerifying: Uint8Array[] = []
 
   // Bounded window: a peer that connects and never sends Hello is closed (fail
   // closed). Cleared the instant the Hello is handled or the connection tears down;
@@ -242,8 +280,9 @@ export function serveConnection(
   /**
    * Handle the controller's opening {@link Hello} (the first control frame). Always
    * answer HelloAck with our version + served capabilities so the peer can diagnose
-   * an incompatibility precisely, then either fail closed on skew or move to
-   * `serving` holding the negotiated (intersected) capability set.
+   * an incompatibility precisely, then either fail closed on skew, run the device
+   * gate (S3) when one is configured, or move to `serving` holding the negotiated
+   * (intersected) capability set.
    */
   const handleHello = (payload: Uint8Array): void => {
     clearNegotiationTimer()
@@ -269,8 +308,69 @@ export function serveConnection(
       failClosed(`version incompatible: controller protocol ${hello.protocol} (${compat.reason})`)
       return
     }
+    if (options.verifyDevice) {
+      runDeviceGate(options.verifyDevice, hello)
+      return
+    }
     negotiated = negotiate(servedCapabilities, hello.capabilities)
     phase = 'serving'
+  }
+
+  /**
+   * The device gate (S3): rebuildable-statement verification of the Hello's
+   * claim. A synchronous verdict short-circuits with no buffering window; an
+   * async one holds the connection in `verifying` — inbound control frames are
+   * buffered (bounded by {@link MAX_FRAMES_WHILE_VERIFYING}) and replayed once
+   * the device proves out. Every refusal path is the same undifferentiated
+   * close, with `device not authorized` reported locally via `onError`.
+   */
+  const runDeviceGate = (
+    verifyDevice: NonNullable<ServeConnectionOptions['verifyDevice']>,
+    hello: Hello,
+  ): void => {
+    const sessionId = channel.sessionId
+    if (!sessionId) {
+      // Unreachable once a frame has flowed, but the claim without its channel
+      // binding is unverifiable — refuse, never assume.
+      failClosed('device not authorized')
+      return
+    }
+    const admit = (): void => {
+      negotiated = negotiate(servedCapabilities, hello.capabilities)
+      phase = 'serving'
+      // Replay what the controller sent while we were deciding, in order.
+      for (const buffered of bufferedWhileVerifying.splice(0)) handleRpcPayload(buffered)
+    }
+    let verdict: boolean | Promise<boolean>
+    try {
+      verdict = verifyDevice({
+        deviceKeyId: hello.deviceKeyId,
+        deviceAuth: hello.deviceAuth,
+        sessionId,
+      })
+    } catch {
+      failClosed('device not authorized')
+      return
+    }
+    if (verdict === true) {
+      admit()
+      return
+    }
+    if (verdict === false) {
+      failClosed('device not authorized')
+      return
+    }
+    phase = 'verifying'
+    void Promise.resolve(verdict).then(
+      (allowed) => {
+        if (phase !== 'verifying') return // torn down while deciding
+        if (allowed) admit()
+        else failClosed('device not authorized')
+      },
+      () => {
+        if (phase === 'verifying') failClosed('device not authorized')
+      },
+    )
   }
 
   /**
@@ -497,14 +597,8 @@ export function serveConnection(
     }
   }
 
-  const onControl = (payload: Uint8Array): void => {
-    // The connection is dead (failed negotiation / torn down): serve nothing.
-    if (phase === 'dead') return
-    // The first control frame must be the handshake; RPC only flows after it.
-    if (phase === 'awaiting-hello') {
-      handleHello(payload)
-      return
-    }
+  /** Parse and dispatch one RPC control payload (the post-handshake path). */
+  const handleRpcPayload = (payload: Uint8Array): void => {
     let request: RpcRequest
     try {
       request = RpcRequest.parse(JSON.parse(decoder.decode(payload)))
@@ -519,6 +613,27 @@ export function serveConnection(
       options.onError?.(asError(error))
       send(failure(request.id, ErrorCode.Internal, 'internal error handling request'))
     }
+  }
+
+  const onControl = (payload: Uint8Array): void => {
+    // The connection is dead (failed negotiation / torn down): serve nothing.
+    if (phase === 'dead') return
+    // The first control frame must be the handshake; RPC only flows after it.
+    if (phase === 'awaiting-hello') {
+      handleHello(payload)
+      return
+    }
+    // Device gate in flight: hold the frame (bounded) — replayed on success,
+    // discarded on refusal. A flood past the bound is itself a refusal.
+    if (phase === 'verifying') {
+      if (bufferedWhileVerifying.length >= MAX_FRAMES_WHILE_VERIFYING) {
+        failClosed('device not authorized')
+        return
+      }
+      bufferedWhileVerifying.push(payload)
+      return
+    }
+    handleRpcPayload(payload)
   }
 
   channel.onFrame((frame: ChannelFrame) => {

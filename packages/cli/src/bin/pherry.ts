@@ -25,7 +25,8 @@ import {
   runAttentionWatch,
 } from '../commands/attention.js'
 import { runAnchor, runBoard, runUnboard } from '../commands/board.js'
-import { runDock } from '../commands/dock.js'
+import { runDevicesList, runDevicesRevoke } from '../commands/devices.js'
+import { enrollDevice, runDock } from '../commands/dock.js'
 import { runHostsForget, runHostsList, runHostsTrust } from '../commands/hosts.js'
 import { runOpen } from '../commands/open.js'
 import { startRun } from '../commands/run.js'
@@ -37,8 +38,8 @@ import { livePid } from '../daemon/pidfile.js'
 const USAGE = `pherry — steer your coding agents from your phone
 
 Usage:
-  pherry dock [--api <url>] [--token <tok>]
-                                    sign in, register this host, pair your phone
+  pherry dock [--api <url>] [--token <tok>] [--no-wait]
+                                    sign in, register this host, pair + enroll your phone
   pherry board [<repo>] [--no-rc]   install PATH shims so agents launch under custody
                                     (wires them into your shell rc; --no-rc skips that)
   pherry anchor [<repo>]            soft brake: stop custodying new launches here
@@ -46,6 +47,8 @@ Usage:
   pherry sessions                   list the daemon's live sessions
   pherry hosts list | trust <id> --key <b64> | forget <id>
                                     the host keys this machine trusts for a remote attach
+  pherry devices list | revoke <deviceKeyId>
+                                    the devices this host accepts remote steering from
   pherry attention raise --kind <k> --summary <text> [--session <ref>]
                                     tell your operator a session needs a human
   pherry attention list | watch | ack <id>
@@ -84,6 +87,8 @@ async function main(argv: string[]): Promise<number> {
       return sessionsCommand()
     case 'hosts':
       return hostsCommand(rest)
+    case 'devices':
+      return devicesCommand(rest)
     case 'attention':
       return attentionCommand(rest)
     case 'serve':
@@ -115,6 +120,7 @@ async function dockCommand(args: string[]): Promise<number> {
       token: { type: 'string' },
       name: { type: 'string' },
       'no-daemon': { type: 'boolean' },
+      'no-wait': { type: 'boolean' },
     },
   })
   // Flags win over the environment fallbacks.
@@ -148,6 +154,19 @@ async function dockCommand(args: string[]): Promise<number> {
       process.stdout.write(
         'pherry: restart the daemon to dial the relay: `pherry serve --stop` then `pherry serve`\n',
       )
+    }
+
+    // The enrollment ceremony (S3): wait for the phone to scan, show the
+    // fingerprint, and ask before this host accepts its steering. Skippable —
+    // the phone can pair later, it just cannot steer until it is enrolled.
+    if (!values['no-wait']) {
+      await enrollDevice({
+        ...baseDirOption(),
+        apiUrl: result.apiUrl,
+        pairToken: result.pair.pairToken,
+        expiresAt: result.pair.expiresAt,
+        onStep: (line) => process.stdout.write(`${line}\n`),
+      })
     }
     return 0
   } catch (error) {
@@ -291,6 +310,42 @@ async function hostsCommand(argv: string[]): Promise<number> {
   }
 
   process.stderr.write(`${HOSTS_USAGE}\n`)
+  return 2
+}
+
+/** Per-verb help for `pherry devices`, printed for an unknown or missing subcommand. */
+const DEVICES_USAGE = `pherry devices — the devices this host accepts remote steering from
+
+Usage:
+  pherry devices list                        show every enrolled device + its fingerprint
+  pherry devices revoke <deviceKeyId>        cut a device off (takes effect next connection)
+
+Enrollment is the \`pherry dock\` ceremony — a human compares the fingerprint the
+host prints with the one the phone shows. There is deliberately no way to enroll
+without that comparison.`
+
+/** `pherry devices …` — inspect and revoke the authorized-device keyring. */
+async function devicesCommand(argv: string[]): Promise<number> {
+  const [subcommand, ...rest] = argv
+  const write = (line: string): void => {
+    process.stdout.write(`${line}\n`)
+  }
+
+  if (subcommand === 'list' || subcommand === undefined) {
+    await runDevicesList({ ...baseDirOption(), onLine: write })
+    return 0
+  }
+
+  if (subcommand === 'revoke') {
+    const deviceKeyId = rest[0]
+    if (!deviceKeyId) {
+      process.stderr.write(`${DEVICES_USAGE}\n`)
+      return 2
+    }
+    return (await runDevicesRevoke(deviceKeyId, { ...baseDirOption(), onLine: write })) ? 0 : 1
+  }
+
+  process.stderr.write(`${DEVICES_USAGE}\n`)
   return 2
 }
 

@@ -201,6 +201,12 @@ importers:
 
   packages/cli:
     dependencies:
+      '@noble/curves':
+        specifier: ^1.9.7
+        version: 1.9.7
+      '@noble/hashes':
+        specifier: ^1.8.0
+        version: 1.8.0
       '@pherry/channel':
         specifier: workspace:*
         version: link:../channel
@@ -350,6 +356,9 @@ importers:
 
   protocol:
     dependencies:
+      '@noble/hashes':
+        specifier: ^1.8.0
+        version: 1.8.0
       zod:
         specifier: ^3.24.1
         version: 3.25.76

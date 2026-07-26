@@ -75,6 +75,10 @@ public actor ControllerClient {
     // bounded by `negotiationTimeout`, on a host that withholds its HelloAck without closing.
     // Every request gates on `ensureNegotiated()`.
     private let capabilities: [String]
+    /// The S3 device-auth claim to sign into the `Hello` — the signer plus the dialed host id
+    /// the statement binds. `nil` sends the canonical null claim (the signerless path; the app
+    /// always injects one, so iOS never sends it outside unit tests).
+    private let deviceAuth: DeviceAuthContext?
     /// Bounded window to await the host's `HelloAck` before failing the negotiation closed —
     /// the fail-closed property the reference SDK controller and host both enforce (default 10s).
     private let negotiationTimeout: Duration
@@ -96,11 +100,18 @@ public actor ControllerClient {
     /// `HelloAck`), and begins consuming its inbound frames — so it is safe to construct
     /// before the channel is open. `negotiationTimeout` bounds the wait for the host's
     /// `HelloAck` before failing every request closed (default 10s, matching the reference
-    /// SDK controller and host).
-    public init(channel: SecureChannel, negotiationTimeout: Duration = .seconds(10)) {
+    /// SDK controller and host). `deviceAuth` is the S3 device-identity claim signed into the
+    /// `Hello` — a device-gated host refuses to serve without a valid one, so every remote
+    /// caller injects it (only signerless unit tests omit it and ride the null claim).
+    public init(
+        channel: SecureChannel,
+        negotiationTimeout: Duration = .seconds(10),
+        deviceAuth: DeviceAuthContext? = nil
+    ) {
         self.channel = channel
         self.capabilities = PherryProtocol.controllerCapabilities
         self.negotiationTimeout = negotiationTimeout
+        self.deviceAuth = deviceAuth
         Task { await self.run() }
     }
 
@@ -223,12 +234,40 @@ public actor ControllerClient {
         Task { [channel] in await channel.close() }
     }
 
-    /// Send the opening `Hello` — the first control frame — advertising this build's
-    /// version and capabilities. Its `publicKey` is the base64 channel session id (an
-    /// advisory channel-binding; identity is already proven by the pinned channel).
+    /// Send the opening `Hello` — the first control frame — advertising this build's version,
+    /// capabilities, and device-auth claim. Its `publicKey` is the base64 channel session id
+    /// (an advisory channel-binding; host identity is already proven by the pinned channel);
+    /// `deviceKeyId` / `deviceAuth` carry the S3 signed statement binding that same session id
+    /// and the dialed host, so a captured `Hello` replays on no other channel. A signer that
+    /// throws fails the negotiation closed (the run loop tears the client down) — a `Hello`
+    /// is never sent with a half-made claim.
     private func sendHello() async throws {
-        let publicKey = (await channel.sessionId)?.base64EncodedString() ?? ""
-        let hello = try HandshakeCodec.encodeHello(capabilities: capabilities, publicKey: publicKey)
+        let sessionId = (await channel.sessionId) ?? Data()
+        let publicKey = sessionId.base64EncodedString()
+        let deviceKeyId: String
+        let deviceAuthB64: String
+        if let deviceAuth {
+            deviceKeyId = deviceAuth.signer.deviceKeyId
+            let message = try DeviceAuth.message(
+                sessionId: sessionId, hostId: deviceAuth.hostId, deviceKeyId: deviceKeyId
+            )
+            let signature = try await deviceAuth.signer.sign(message: message)
+            guard signature.count == DeviceAuth.signatureBytes else {
+                throw ChannelError.handshakeFailed(
+                    "device auth: signer returned \(signature.count) bytes, expected \(DeviceAuth.signatureBytes)"
+                )
+            }
+            deviceAuthB64 = signature.base64EncodedString()
+        } else {
+            deviceKeyId = DeviceAuth.nullDeviceKeyId
+            deviceAuthB64 = DeviceAuth.nullDeviceAuth
+        }
+        let hello = try HandshakeCodec.encodeHello(
+            capabilities: capabilities,
+            publicKey: publicKey,
+            deviceKeyId: deviceKeyId,
+            deviceAuth: deviceAuthB64
+        )
         try await channel.send(ChannelFrame(tag: .control, payload: hello))
     }
 

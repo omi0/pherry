@@ -18,11 +18,19 @@
  * understood at all.
  */
 
-/** The protocol version this build speaks. */
-export const PROTOCOL_VERSION = 1
+/**
+ * The protocol version this build speaks.
+ *
+ * **2** (S3): the auth handshake changed — `Hello` gained the required
+ * `deviceKeyId` / `deviceAuth` device-identity fields. A changed auth
+ * handshake is a named bump trigger (above), and nothing is deployed to real
+ * users, so this was a hard cutover: {@link MIN_COMPATIBLE_VERSION} moved with
+ * it and every first-party peer upgraded in the same leg.
+ */
+export const PROTOCOL_VERSION = 2
 
 /** The oldest peer version this build can still interoperate with. */
-export const MIN_COMPATIBLE_VERSION = 1
+export const MIN_COMPATIBLE_VERSION = 2
 
 /** Outcome of a one-directional compatibility check. */
 export type CompatResult = { ok: true } | { ok: false; reason: 'peer-too-old' | 'self-too-old' }

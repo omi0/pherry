@@ -25,12 +25,16 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { hostname } from 'node:os'
 import { encodeKey } from '@pherry/channel'
+import { deviceFingerprint, deviceKeyIdOf } from '@pherry/protocol'
 import { ControlPlaneClient, ControlPlaneError, resolveApiUrl } from '../control-plane-client.js'
 import { livePid } from '../daemon/pidfile.js'
+import { loadOrCreateDeviceKey } from '../device-key.js'
+import { writeAuthorizedDevice } from '../device-keyring.js'
 import { type DockConfig, dockConfigPath, readDockConfig, writeDockConfig } from '../dock-config.js'
 import { defaultHostKeyDir, loadOrCreateHostKey, publicKeyPath } from '../host-key.js'
 import { knownHostEntry, writeKnownHost } from '../known-hosts.js'
 import { configPath } from '../paths.js'
+import { type PromptIo, confirm, isInteractive, processPromptIo } from '../prompt.js'
 import { renderQrTerminal } from '../qr.js'
 
 /** Options for {@link runDock}. */
@@ -145,6 +149,21 @@ export async function runDock(options: DockOptions = {}): Promise<DockResult> {
     baseDir,
   )
 
+  // 3c. Enroll this machine's own device key in the host keyring (S3) — the
+  // mirror of 3b: the machine that docked a host can steer it remotely with no
+  // extra ceremony. Both keys live on this disk already, so there is no
+  // fingerprint to compare and no control plane in the loop.
+  const deviceKey = await loadOrCreateDeviceKey(baseDir)
+  await writeAuthorizedDevice(
+    {
+      deviceKeyId: deviceKey.deviceKeyId,
+      publicKeyB64: Buffer.from(deviceKey.publicKey).toString('base64'),
+      label: 'this machine (pherry dock)',
+      enrolledAt: new Date().toISOString(),
+    },
+    baseDir,
+  )
+
   // 4. Daemon — reuse leg-3c's ensure logic verbatim.
   const daemon = await ensureDaemon(options)
   const daemonNeedsRestart = daemon === 'already-running' && registration.registered === 'created'
@@ -175,6 +194,133 @@ export async function runDock(options: DockOptions = {}): Promise<DockResult> {
     daemonNeedsRestart,
     pair: { pairToken: pair.pairToken, expiresAt: pair.expiresAt, qrUrl: pair.qrUrl, qrText },
   }
+}
+
+/** Options for {@link enrollDevice} — the post-QR phone enrollment ceremony. */
+export interface EnrollDeviceOptions {
+  /** Pherry home dir override (tests). Defaults to `~/.pherry`. */
+  baseDir?: string
+  /** The control plane's base URL. */
+  apiUrl: string
+  /** The pair token whose redemption is awaited. */
+  pairToken: string
+  /** The pair token's expiry (epoch ms) — the wait is bounded by it. */
+  expiresAt: number
+  /** The `fetch` to reach the control plane (tests). Defaults to `globalThis.fetch`. */
+  fetchImpl?: typeof fetch
+  /** Receives each guided-narration line (the bin writes it to stdout). */
+  onStep?: (line: string) => void
+  /** The prompt streams (tests). Defaults to the process's. */
+  promptIo?: PromptIo
+  /** Poll interval override, in ms (tests). Defaults to 2s. */
+  pollIntervalMs?: number
+}
+
+/** The outcome of {@link enrollDevice}. */
+export type EnrollDeviceResult =
+  | { enrolled: true; deviceKeyId: string; fingerprint: string; name: string | null }
+  | { enrolled: false; reason: 'expired' | 'declined' | 'non-interactive' | 'no-key' }
+
+/** Default interval between pair-status polls. */
+const ENROLL_POLL_INTERVAL_MS = 2_000
+
+/**
+ * The device-enrollment ceremony (S3) — run by the bin **after** it prints the
+ * pairing QR (`runDock` itself stays non-blocking; programmatic callers redeem
+ * on their own schedule and `--no-wait` skips this entirely):
+ *
+ * 1. Poll `POST /v1/pair/status` until the phone redeems, bounded by the pair
+ *    token's own expiry.
+ * 2. Render the redeeming device's **fingerprint** (derived here, from the key
+ *    bytes the status response carried) and display name.
+ * 3. Ask for an explicit `y` — the human compares the fingerprint against the
+ *    one the phone shows on its pairing success card. This comparison is the
+ *    security: the control plane only *carried* the key, and a substituted key
+ *    makes the two fingerprints visibly diverge.
+ * 4. On `y`, write the device into `~/.pherry/devices.json` — the keyring every
+ *    remote steer is verified against. On anything else, write nothing: the
+ *    phone holds a device token but no host will accept its steering, which is
+ *    the correct fail-closed outcome.
+ *
+ * A non-interactive stdin cannot compare fingerprints, so it refuses (nothing
+ * is enrolled) rather than assume.
+ */
+export async function enrollDevice(options: EnrollDeviceOptions): Promise<EnrollDeviceResult> {
+  const step = options.onStep ?? (() => {})
+  const promptIo = options.promptIo ?? processPromptIo()
+  const client = new ControlPlaneClient({
+    apiUrl: options.apiUrl,
+    ...(options.fetchImpl !== undefined ? { fetchImpl: options.fetchImpl } : {}),
+  })
+  const interval = options.pollIntervalMs ?? ENROLL_POLL_INTERVAL_MS
+
+  step('pherry: waiting for the phone to scan (Ctrl-C or --no-wait to skip)…')
+  let device: { name: string | null; publicKeyB64: string | null } | null | undefined
+  for (;;) {
+    if (Date.now() >= options.expiresAt) {
+      step(
+        'pherry: the pairing QR expired before a phone redeemed it — run `pherry dock` again to mint a fresh one',
+      )
+      return { enrolled: false, reason: 'expired' }
+    }
+    const status = await client.pairStatus(options.pairToken)
+    if (status.status === 'redeemed') {
+      device = status.device
+      break
+    }
+    if (status.status === 'expired') {
+      step(
+        'pherry: the pairing QR expired before a phone redeemed it — run `pherry dock` again to mint a fresh one',
+      )
+      return { enrolled: false, reason: 'expired' }
+    }
+    await sleep(interval)
+  }
+
+  if (!device?.publicKeyB64) {
+    // A pre-S3 app redeemed without an identity key: it can pair, but no host
+    // will accept its steering until it re-pairs with an upgraded app.
+    step(
+      'pherry: the phone paired but sent no device identity key — update the Pherry app and re-pair',
+    )
+    return { enrolled: false, reason: 'no-key' }
+  }
+
+  const publicKey = new Uint8Array(Buffer.from(device.publicKeyB64, 'base64'))
+  const deviceKeyId = deviceKeyIdOf(publicKey)
+  const fingerprint = deviceFingerprint(deviceKeyId)
+  const name = device.name
+  step(`pherry: "${name ?? 'device'}" paired — fingerprint ${fingerprint}`)
+  step('pherry: the phone shows the same fingerprint on its pairing screen; they must match')
+
+  if (!isInteractive(promptIo)) {
+    step(
+      'pherry: not an interactive terminal — nothing enrolled. Re-run `pherry dock` from a terminal to approve this device.',
+    )
+    return { enrolled: false, reason: 'non-interactive' }
+  }
+  const approved = await confirm(`Dock "${name ?? 'device'}"?  ${fingerprint}`, promptIo)
+  if (!approved) {
+    step('pherry: declined — nothing enrolled; the phone cannot steer this host')
+    return { enrolled: false, reason: 'declined' }
+  }
+
+  await writeAuthorizedDevice(
+    {
+      deviceKeyId,
+      publicKeyB64: device.publicKeyB64,
+      label: name ?? 'device',
+      enrolledAt: new Date().toISOString(),
+    },
+    options.baseDir,
+  )
+  step(`pherry: enrolled "${name ?? 'device'}" (${deviceKeyId}) — it can now steer this host`)
+  return { enrolled: true, deviceKeyId, fingerprint, name }
+}
+
+/** A cancel-free delay. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /** The result of the sign-in step: a human token and how it was obtained. */

@@ -14,9 +14,12 @@ import {
 } from '@pherry/channel'
 import {
   MIRROR_SNAPSHOT,
+  NULL_DEVICE_AUTH,
+  NULL_DEVICE_KEY_ID,
   PROTOCOL_VERSION,
   PTY_STREAM,
   SESSION_INPUT,
+  deviceAuthMessage,
   newSessionRef,
 } from '@pherry/protocol'
 import { describe, expect, it } from 'vitest'
@@ -77,6 +80,7 @@ function scriptedHost(
     protocol?: number
     capabilities?: readonly string[]
     replyHelloAck?: boolean
+    onHello?: (hello: Record<string, unknown>) => void
     onRequest?: (id: string, method: string, params: unknown) => unknown
   } = {},
 ): void {
@@ -85,6 +89,7 @@ function scriptedHost(
     const obj = JSON.parse(decoder.decode(frame.payload)) as Record<string, unknown>
     if (typeof obj.role === 'string') {
       // The controller's opening Hello.
+      opts.onHello?.(obj)
       if (opts.replyHelloAck === false) return
       const ack = {
         protocol: opts.protocol ?? PROTOCOL_VERSION,
@@ -168,5 +173,89 @@ describe('Controller handshake (leg-M22)', () => {
     expect(err).toBeInstanceOf(RpcClientError)
     // A silent host is unavailable, not a version mismatch.
     expect((err as RpcClientError).code).toBe('UNAVAILABLE')
+  })
+})
+
+describe('Controller device identity (S3)', () => {
+  it('with a signer: the Hello carries the key id and a signature over the canonical statement', async () => {
+    const hellos: Record<string, unknown>[] = []
+    const signedMessages: Uint8Array[] = []
+    const signature = Uint8Array.from({ length: 64 }, (_, i) => i)
+    const { controller, initiator } = await connect(
+      { onHello: (hello) => hellos.push(hello) },
+      {
+        hostId: 'host_under_test',
+        deviceSigner: {
+          deviceKeyId: '8f2a91c34d7e0b55',
+          sign: (message) => {
+            signedMessages.push(message)
+            return signature
+          },
+        },
+      },
+    )
+    await controller.negotiated()
+    expect(hellos).toHaveLength(1)
+    expect(hellos[0]?.deviceKeyId).toBe('8f2a91c34d7e0b55')
+    expect(hellos[0]?.deviceAuth).toBe(Buffer.from(signature).toString('base64'))
+    // The signed bytes are exactly the canonical statement over THIS channel's
+    // session id, the dialed host, and the signer's key id.
+    expect(signedMessages).toHaveLength(1)
+    const sessionId = initiator.sessionId
+    expect(sessionId).not.toBeNull()
+    const expected = deviceAuthMessage({
+      sessionId: sessionId as Uint8Array,
+      hostId: 'host_under_test',
+      deviceKeyId: '8f2a91c34d7e0b55',
+    })
+    expect(Buffer.from(signedMessages[0] ?? []).equals(Buffer.from(expected))).toBe(true)
+    controller.close()
+  })
+
+  it('without a signer: the Hello carries the canonical null claim (the local path)', async () => {
+    const hellos: Record<string, unknown>[] = []
+    const { controller } = await connect({ onHello: (hello) => hellos.push(hello) })
+    await controller.negotiated()
+    expect(hellos[0]?.deviceKeyId).toBe(NULL_DEVICE_KEY_ID)
+    expect(hellos[0]?.deviceAuth).toBe(NULL_DEVICE_AUTH)
+    controller.close()
+  })
+
+  it('a signer without hostId is a constructor error — the statement binds the dialed host', () => {
+    const { a } = linkedDuplex()
+    const channel = new SecureChannel({
+      role: 'initiator',
+      duplex: a,
+      pinnedHostStatic: generateKeyPair().publicKey,
+    })
+    expect(
+      () =>
+        new Controller(channel, {
+          deviceSigner: { deviceKeyId: '8f2a91c34d7e0b55', sign: () => new Uint8Array(64) },
+        }),
+    ).toThrow(/hostId/)
+    channel.close()
+  })
+
+  it('a signer failure fails the negotiation closed (no Hello, no RPC)', async () => {
+    const hellos: Record<string, unknown>[] = []
+    const { controller } = await connect(
+      { onHello: (hello) => hellos.push(hello) },
+      {
+        hostId: 'host_under_test',
+        deviceSigner: {
+          deviceKeyId: '8f2a91c34d7e0b55',
+          sign: () => {
+            throw new Error('secure element unavailable')
+          },
+        },
+      },
+    )
+    const err = await rejection(controller.negotiated())
+    expect((err as Error).message).toMatch(/secure element unavailable/)
+    expect(hellos).toEqual([]) // nothing was sent toward the host
+    const subErr = await rejection(controller.subscribe(newSessionRef()))
+    expect(subErr).toBeInstanceOf(Error)
+    controller.close()
   })
 })

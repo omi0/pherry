@@ -49,6 +49,8 @@ describe('schema round-trip', () => {
     )
     expect(host.id).toMatch(/^host_[0-9a-f]{32}$/)
     expect(device.id).toMatch(/^dev_[0-9a-f]{32}$/)
+    // The identity key is nullable — a device that predates it simply has none.
+    expect(device.devicePublicKey).toBeNull()
     expect(ptRows[0]?.redeemedAt).toBeNull()
     expect(sesRows[0]?.status).toBe('live')
 

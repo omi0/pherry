@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { runDock } from '../src/commands/dock.js'
+import { loadOrCreateDeviceKey } from '../src/device-key.js'
+import { readAuthorizedDevices } from '../src/device-keyring.js'
 import { dockConfigPath } from '../src/dock-config.js'
 import { hostPidPath, publicKeyPath } from '../src/index.js'
 
@@ -328,6 +330,15 @@ describe('runDock — guided onboarding against a control plane', () => {
     expect(daemon.spawned()).toBe(true)
     expect(result.daemon).toBe('started')
     expect(result.daemonNeedsRestart).toBe(false)
+
+    // S3: dock self-enrolled this machine's device key — the machine that
+    // docked a host can steer it remotely with no extra ceremony.
+    const devices = await readAuthorizedDevices(baseDir)
+    const ownKey = await loadOrCreateDeviceKey(baseDir)
+    expect(devices.map((d) => d.deviceKeyId)).toContain(ownKey.deviceKeyId)
+    expect(devices.find((d) => d.deviceKeyId === ownKey.deviceKeyId)?.label).toBe(
+      'this machine (pherry dock)',
+    )
   })
 
   it('is idempotent: a re-dock with a valid credential reuses the host and re-pairs', async () => {

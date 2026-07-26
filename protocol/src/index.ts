@@ -64,6 +64,20 @@ export {
 // Handshake
 export { Hello, HelloAck, Role, negotiateHello } from './handshake.js'
 export type { HandshakeOutcome } from './handshake.js'
+export {
+  DEVICE_AUTH_LABEL,
+  DEVICE_AUTH_SESSION_ID_BYTES,
+  DEVICE_AUTH_SIGNATURE_BYTES,
+  DEVICE_KEY_ID_LENGTH,
+  DEVICE_KEY_ID_PATTERN,
+  DEVICE_PUBLIC_KEY_BYTES,
+  NULL_DEVICE_AUTH,
+  NULL_DEVICE_KEY_ID,
+  deviceAuthMessage,
+  deviceFingerprint,
+  deviceKeyIdOf,
+} from './device-auth.js'
+export type { DeviceAuthInput } from './device-auth.js'
 
 // Control envelope
 export {

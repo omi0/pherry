@@ -134,7 +134,7 @@ function wire(channel: SecureChannel) {
 }
 
 /** Stand up a host serving one live session, plus a raw un-negotiated wire peer. */
-async function connect(options: { negotiationTimeoutMs?: number } = {}) {
+async function connect(options: import('../src/index.js').ServeConnectionOptions = {}) {
   const registry = new SessionRegistry()
   const backend = new FakeBackend()
   const handle = await backend.spawn(spec)

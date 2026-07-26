@@ -70,6 +70,21 @@ export interface HeartbeatResult {
   ok: true
 }
 
+/**
+ * What `POST /v1/pair/status` returns — a pair token's lifecycle, plus (S3) the
+ * redeeming device's display name and identity public key once `redeemed`. The
+ * endpoint is unauthenticated by design: possession of the full pair token is
+ * already the capability, and a public key is not a secret. The key is what the
+ * dock enrollment ceremony fingerprints — carried by the control plane, never
+ * vouched for by it (a substituted key makes the host- and phone-displayed
+ * fingerprints diverge in front of the user).
+ */
+export interface PairStatusResult {
+  status: 'pending' | 'redeemed' | 'expired'
+  /** Present only once `redeemed`; `publicKeyB64` is `null` for a pre-S3 phone. */
+  device?: { name: string | null; publicKeyB64: string | null } | null
+}
+
 /** What `POST /v1/relay/tickets` returns — a one-time ticket to reach a host. */
 export interface RelayTicketResult {
   ticket: string
@@ -201,6 +216,11 @@ export class ControlPlaneClient {
     return this.request('POST', `/v1/hosts/${encodeURIComponent(hostId)}/pair`, {
       token: humanToken,
     })
+  }
+
+  /** Poll a pair token's lifecycle (no auth — the token itself is the capability). */
+  pairStatus(pairToken: string): Promise<PairStatusResult> {
+    return this.request('POST', '/v1/pair/status', { body: { pairToken } })
   }
 
   /** Report liveness and optional session metadata (host `hk_` credential). */

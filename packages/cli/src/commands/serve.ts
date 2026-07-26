@@ -73,6 +73,7 @@ import {
   type RelayUplinkState,
   startRelayUplink,
 } from '../daemon/relay-uplink.js'
+import { buildVerifyDevice } from '../device-keyring.js'
 import { type DockConfig, readDockConfig } from '../dock-config.js'
 import { defaultHostKeyDir, loadOrCreateHostKey } from '../host-key.js'
 import { hostPidPath, hostSocketPath } from '../paths.js'
@@ -307,7 +308,15 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
           // "the shim/`open` is the only caller" — so it is served on the local
           // unix socket ONLY (above), never over the org-scoped relay ticket.
           // Remote spawn for cloud hosts is the separate `sandbox.spawn` method.
-          const served = serveConnection(channel, registry, { listSessions })
+          //
+          // Device gate (S3): every remote steer must prove an ENROLLED device
+          // key over this machine's keyring (`~/.pherry/devices.json`). The
+          // local unix-socket path above deliberately passes no `verifyDevice`
+          // — it stays trust-by-filesystem at the socket's 0600.
+          const served = serveConnection(channel, registry, {
+            listSessions,
+            verifyDevice: buildVerifyDevice(dock.hostId, baseDir),
+          })
           // Same onClose bookkeeping as a local connection.
           channel.onClose(() => {
             served.close()

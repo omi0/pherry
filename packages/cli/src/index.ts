@@ -44,6 +44,28 @@ export { type PromptIo, confirm, isInteractive, processPromptIo } from './prompt
 export { runHostsForget, runHostsList, runHostsTrust } from './commands/hosts.js'
 export type { HostsOptions } from './commands/hosts.js'
 
+// S3 — device identity: this machine's signing key, the host's authorized-device
+// keyring, the enrollment ceremony, and the day-2 devices commands.
+export {
+  type DeviceKey,
+  deviceKeyPath,
+  deviceSignerFor,
+  loadOrCreateDeviceKey,
+} from './device-key.js'
+export {
+  type AuthorizedDevice,
+  buildVerifyDevice,
+  devicesPath,
+  lookupAuthorizedDevice,
+  readAuthorizedDevices,
+  revokeAuthorizedDevice,
+  writeAuthorizedDevice,
+} from './device-keyring.js'
+export { enrollDevice } from './commands/dock.js'
+export type { EnrollDeviceOptions, EnrollDeviceResult } from './commands/dock.js'
+export { runDevicesList, runDevicesRevoke } from './commands/devices.js'
+export type { DevicesOptions } from './commands/devices.js'
+
 // The dev commands, as callable functions.
 export { resolveAgentArgv, startRun } from './commands/run.js'
 export type { RunHandle, RunOptions } from './commands/run.js'

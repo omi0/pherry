@@ -14,9 +14,11 @@ import {
   newTicket,
   relayChannelContext,
 } from '@pherry/relay-core'
-import { Controller } from '@pherry/sdk'
+import { Controller, type DeviceSigner } from '@pherry/sdk'
 import { afterEach, describe, expect, it } from 'vitest'
 import { connectDaemon } from '../src/daemon/client.js'
+import { deviceSignerFor, loadOrCreateDeviceKey } from '../src/device-key.js'
+import { writeAuthorizedDevice } from '../src/device-keyring.js'
 import { writeDockConfig } from '../src/dock-config.js'
 import { loadOrCreateHostKey } from '../src/host-key.js'
 import { startServe } from '../src/index.js'
@@ -95,7 +97,11 @@ function recordingFetch(calls: FetchCall[], opts: { fail?: boolean } = {}): type
   return impl as typeof fetch
 }
 
-/** Generate + persist the host key and write a `dock.json` pointing at a control plane. */
+/**
+ * Generate + persist the host key, write a `dock.json` pointing at a control
+ * plane, and enroll this machine's device key (S3) — what `pherry dock` does,
+ * so a relay controller signing with that key passes the device gate.
+ */
 let hostCounter = 0
 async function provisionDock(baseDir: string) {
   const keyPair = await loadOrCreateHostKey(baseDir)
@@ -107,7 +113,24 @@ async function provisionDock(baseDir: string) {
     { apiUrl, directorUrl: 'tcp://relay.invalid:1', hostId, hostCredential },
     baseDir,
   )
-  return { keyPair, hostPublicKey: keyPair.publicKey, hostId, apiUrl, hostCredential }
+  const deviceKey = await loadOrCreateDeviceKey(baseDir)
+  await writeAuthorizedDevice(
+    {
+      deviceKeyId: deviceKey.deviceKeyId,
+      publicKeyB64: Buffer.from(deviceKey.publicKey).toString('base64'),
+      label: 'this machine (test dock)',
+      enrolledAt: new Date().toISOString(),
+    },
+    baseDir,
+  )
+  return {
+    keyPair,
+    hostPublicKey: keyPair.publicKey,
+    hostId,
+    apiUrl,
+    hostCredential,
+    deviceSigner: deviceSignerFor(deviceKey),
+  }
 }
 
 /**
@@ -151,16 +174,21 @@ async function connectController(
   ticket: string,
   hostId: string,
   hostPublicKey: Uint8Array,
-  contextTicket: string = ticket,
+  options: { contextTicket?: string; deviceSigner?: DeviceSigner } = {},
 ): Promise<{ controller: Controller; channel: SecureChannel }> {
   const duplex = await connectViaCell({ connect: () => cell.connectInProcess(), ticket })
   const channel = new SecureChannel({
     role: 'initiator',
     duplex,
     pinnedHostStatic: hostPublicKey,
-    context: relayChannelContext(hostId, contextTicket),
+    context: relayChannelContext(hostId, options.contextTicket ?? ticket),
   })
-  const controller = new Controller(channel)
+  // A relay controller signs the device-auth statement (S3); a test that wants
+  // to model an unenrolled device simply omits the signer.
+  const controller = new Controller(
+    channel,
+    options.deviceSigner ? { hostId, deviceSigner: options.deviceSigner } : {},
+  )
   cleanups.push(() => controller.close())
   await channel.ready()
   return { controller, channel }
@@ -234,6 +262,7 @@ describe('serve — the outbound relay uplink (leg-P2c §1)', () => {
       issueTicket(),
       dock.hostId,
       dock.hostPublicKey,
+      { deviceSigner: dock.deviceSigner },
     )
     const list = await controller.request('sessions.list', {})
     expect(list.sessions.map((s) => s.sessionRef)).toContain(sessionRef)
@@ -250,6 +279,59 @@ describe('serve — the outbound relay uplink (leg-P2c §1)', () => {
     expect(inner.writesTo(rec.lastSpawned()).map(dec)).toContain('whoami\n')
   })
 
+  /**
+   * The refused-device observable: the host fails the connection closed after
+   * its HelloAck, and the channel layer deliberately cannot distinguish a dead
+   * peer from a stall (no transport-close signal — leg-P2 §threat model), so
+   * "refused" surfaces as a rejection OR dead silence. What must NEVER happen
+   * is the request being served.
+   */
+  async function neverServed(controller: Controller): Promise<void> {
+    const outcome = await Promise.race([
+      controller.request('sessions.list', {}).then(
+        () => 'served',
+        () => 'refused',
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve('silence'), 400)),
+    ])
+    expect(outcome).not.toBe('served')
+  }
+
+  it('SECURITY (S3): an UNENROLLED device completes the channel + Hello and is served nothing', async () => {
+    const { baseDir, cell, dock, issueTicket } = await startDocked()
+    await createLocalSession(baseDir)
+
+    // A signer whose key was never enrolled on this host: fresh key, own dir.
+    const strangerDir = await mkdtemp(join(tmpdir(), 'ph-stranger-'))
+    cleanups.push(() => rm(strangerDir, { recursive: true, force: true }))
+    const strangerKey = await loadOrCreateDeviceKey(strangerDir)
+
+    const { controller } = await connectController(
+      cell,
+      issueTicket(),
+      dock.hostId,
+      dock.hostPublicKey,
+      { deviceSigner: deviceSignerFor(strangerKey) },
+    )
+    // The channel completes (the stranger has the pinned host key and a valid
+    // ticket) and the Hello is perfectly well-formed — yet nothing is served.
+    await neverServed(controller)
+  })
+
+  it('SECURITY (S3): a signerless (null-claim) controller is refused over the relay', async () => {
+    const { baseDir, cell, dock, issueTicket } = await startDocked()
+    await createLocalSession(baseDir)
+    // No deviceSigner: the Hello carries the canonical null claim — fine on the
+    // local socket, never past the relay's device gate.
+    const { controller } = await connectController(
+      cell,
+      issueTicket(),
+      dock.hostId,
+      dock.hostPublicKey,
+    )
+    await neverServed(controller)
+  })
+
   it('refuses custody over the relay (steer-only) while the local socket still spawns', async () => {
     const { baseDir, cell, dock, issueTicket } = await startDocked()
     // The local unix socket keeps full custody — a session is spawned through it.
@@ -260,6 +342,7 @@ describe('serve — the outbound relay uplink (leg-P2c §1)', () => {
       issueTicket(),
       dock.hostId,
       dock.hostPublicKey,
+      { deviceSigner: dock.deviceSigner },
     )
     // A relay controller may list + steer the session...
     const list = await controller.request('sessions.list', {})
@@ -282,6 +365,7 @@ describe('serve — the outbound relay uplink (leg-P2c §1)', () => {
       issueTicket(),
       dock.hostId,
       dock.hostPublicKey,
+      { deviceSigner: dock.deviceSigner },
     )
 
     // The same session is listed on both doors.
@@ -363,7 +447,9 @@ describe('serve — the outbound relay uplink (leg-P2c §1)', () => {
 
     // A controller reaches the host through cell A.
     const { sessionRef } = await createLocalSession(baseDir)
-    const first = await connectController(cellA, issueTicket(), dock.hostId, dock.hostPublicKey)
+    const first = await connectController(cellA, issueTicket(), dock.hostId, dock.hostPublicKey, {
+      deviceSigner: dock.deviceSigner,
+    })
     const firstEvents = (await first.controller.subscribe(sessionRef)).events[
       Symbol.asyncIterator
     ]()
@@ -387,7 +473,9 @@ describe('serve — the outbound relay uplink (leg-P2c §1)', () => {
     expect(secondReg).toBeGreaterThan(backoff)
 
     // A NEW ticket bridges a controller again, now through cell B.
-    const second = await connectController(cellB, issueTicket(), dock.hostId, dock.hostPublicKey)
+    const second = await connectController(cellB, issueTicket(), dock.hostId, dock.hostPublicKey, {
+      deviceSigner: dock.deviceSigner,
+    })
     const secondEvents = (await second.controller.subscribe(sessionRef)).events[
       Symbol.asyncIterator
     ]()

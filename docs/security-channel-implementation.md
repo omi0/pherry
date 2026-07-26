@@ -147,7 +147,26 @@ Local to `packages/channel`; no wire change, no iOS change.
 
 ---
 
-## S3 — Device identity, enrollment, and mutual authentication *(closes A2)*
+## S3 — Device identity, enrollment, and mutual authentication *(closes A2)* — **DONE**
+
+> **Status: shipped.** All six mandates landed as specified plus the four pinned contracts above.
+> Protocol 2 (hard cutover); `device-auth.ts` is the one statement source with pinned vectors and a
+> new `device-auth.json` conformance vector (the Swift side **verifies** the RFC-6979-deterministic
+> TS signature; it never re-signs). Host: `verifyDevice` seam + `verifying` phase; SDK:
+> `deviceSigner`/`hostId` (null claim when signerless); CLI: `device-key.ts`, `device-keyring.ts`
+> (fresh read per claim → revocation without daemon restart), relay-only gating in `serve.ts`, the
+> `enrollDevice` ceremony + `--no-wait`, `pherry devices list|revoke`, and **dock self-enrolls this
+> machine's device key** (the S1 known-hosts mirror — without it no CLI device could ever be
+> enrolled and the relay e2e would be unreachable; added to the ceremony section's intent, flagged
+> as an amendment). Control plane: migration `0003_flat_nick_fury.sql`, redeem stores the key,
+> status exposes `device {name, publicKeyB64}` only once redeemed (`name` today is never null —
+> redeem defaults it to `'device'`). iOS: SE-backed `DeviceIdentity` (+ labeled software fallback),
+> `DeviceAuthContext` bundles signer+hostId (type-level version of pinned contract 2), fingerprint
+> on the pairing success card. Gate: 991 JS tests (protocol 110 · channel 80 · host 90 · sdk 15 ·
+> cli 201 · control-plane 339 · relay 31 + unchanged others), PherryKit 50, app bundle 44, unsigned
+> simulator build, biome clean. One residual: `make up` against migration 0003 was **not** smoked
+> this session (Docker down); the migration is exercised by the control-plane harness's production
+> `migrateDb` over PGlite.
 
 The substantive leg: TypeScript + Swift + a control-plane migration. Wire change → **protocol version
 bump**.
