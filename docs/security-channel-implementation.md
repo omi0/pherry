@@ -175,6 +175,29 @@ deviceAuth = base64( ECDSA-P256-SHA256(devicePriv, msg) )        // raw r‖s, 6
 - Domain-separated label + `0x00` separators between variable-length fields (every fixed-length
   component is unambiguous), matching `relay-core`'s existing transcript style.
 
+### Contracts pinned while implementing (2026-07-26) — four gaps the spec left open
+
+1. **The null claim.** `Hello.deviceKeyId` / `deviceAuth` are *required*, but the local-socket
+   controller has no signer (and must not grow one — the "no device key present" invariant below).
+   A signerless controller therefore sends the canonical **null claim**:
+   `deviceKeyId = "0000000000000000"`, `deviceAuth = base64(64 zero bytes)`. The wire schema stays
+   uniform (no optional field, no downgrade oracle: a gated host rejects the null id like any
+   unknown id); an ungated host ignores it. Constants live in `protocol/src/device-auth.ts`
+   (`NULL_DEVICE_KEY_ID`, `NULL_DEVICE_AUTH`) — one source of truth.
+2. **The controller must know which host it dialed.** The statement binds `hostId`, so
+   `ControllerOptions` gains `hostId?: string` alongside `deviceSigner`; the constructor throws if a
+   signer is supplied without it. The local path passes neither.
+3. **`verifyDevice` may be async**, and the HelloAck has already been sent when it runs — a fast
+   legitimate controller can have RPCs in flight while the host is still verifying. serve-connection
+   gains a `verifying` phase: inbound control frames are buffered (bounded, 64) and replayed on
+   success; on `false`/throw/overflow → `failClosed('device not authorized')`. A synchronous
+   (non-thenable) return short-circuits with no buffering window at all.
+4. **The dock wait cannot live inside `runDock`.** `runDock` returns the QR *text* — the **bin**
+   prints it — and programmatic callers (the relay e2e) redeem *after* `runDock` returns, so a
+   blocking `runDock` would hang them. The ceremony is a separate exported
+   `enrollDevice(...)` in `dock.ts` (poll status → fingerprint → `confirm` → write keyring),
+   which the bin runs after printing the QR unless `--no-wait`.
+
 ### Protocol (`protocol/`)
 - `handshake.ts`: `Hello` gains `deviceKeyId: z.string().regex(/^[0-9a-f]{16}$/)` and
   `deviceAuth: Base64`. **Required, not optional** — an optional field is a downgrade oracle.
