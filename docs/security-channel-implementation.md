@@ -345,6 +345,43 @@ the leg.
   audit path.
 - Dashboard: an enrollment/authorization log view (this is also the P4 headless mitigation).
 
+### Contracts pinned while implementing (2026-07-26) — the three bullets, made buildable
+
+**Premise corrections first.** There is no "existing audit path": the host daemon wires no `onError`
+into `serveConnection` (an S3 `device not authorized` refusal is currently silent in production), and
+the control plane's only audit surface is the pair-token/`revokedAt` rows. Both halves get built here.
+
+1. **iOS presence gating.** `DeviceIdentity` gains a **presence-gated** creation mode:
+   `SecAccessControlCreateWithFlags(kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+   [.privateKeyUsage, .userPresence])` handed to `SecureEnclave.P256.Signing.PrivateKey(…)`. New
+   identities default **on**. `SettingsView` gets the toggle ("Require Face ID to steer"); because an
+   SE key's access control is fixed at creation, flipping it **rotates the key** — the UI must say
+   plainly: new fingerprint, every host must re-enroll (re-pair), and it must confirm before rotating.
+   The Simulator/software fallback cannot presence-gate: the toggle is disabled and labeled there. A
+   biometric refusal/cancel during `sign` surfaces as the normal connection failure (fail closed,
+   retry re-prompts); it is never bypassed.
+2. **Host-side audit (all in `packages/cli`).** New `audit-log.ts`: an **append-only JSONL** file at
+   `~/.pherry/audit.log` (dir `0700`, file `0600`, same re-pin discipline), entries
+   `{ at, kind, deviceKeyId?, transport?, detail? }`. Wired without touching `packages/host`:
+   `serve.ts` wraps the relay path's `verifyDevice` (accepted → `connection-accepted`, refused →
+   `connection-refused`, both carrying the claimed `deviceKeyId`), logs `connection-local` on each
+   unix-socket accept, and wraps the custody hooks (`custody-reserve` / `custody-claim`, attributed
+   `local` — custody is local-socket-only by H1). `enrollDevice` and `pherry devices revoke` append
+   `device-enrolled` / `device-revoked`. Audit writes are **best-effort** (a logging failure must
+   never take the daemon down or refuse a connection); `pherry devices log` prints the tail.
+3. **Control-plane enrollment/authorization log + dashboard view.** New `auditEvents` table
+   (`aud_<32hex>` ids, `orgId`, `kind`, nullable `hostId`/`deviceId`, nullable `detail` jsonb,
+   `createdAt`, index on `(orgId, createdAt)`) — **append-only** (no update/delete path anywhere).
+   Migration **0004** via `db:generate`. Events written at the moments the control plane already
+   witnesses: `host-registered`, `host-revoked`, `pair-minted`, `device-paired` (redeem; detail
+   records the device name and whether an identity key was carried), `device-revoked`,
+   `ticket-minted` (detail: principal kind — the authorization event). Writes are awaited in the
+   same request (an unlogged authorization must not succeed). `GET /v1/audit?limit=` (human token,
+   org-scoped, newest first, default 100 / max 500). Dashboard: a new **Log** view rendering it.
+4. **Out of scope, recorded:** surfacing the log on the phone (P4 names dashboard *and* phone; S4's
+   bullet names the dashboard — the phone reads the same endpoint later), and forwarding the host's
+   local audit file up to the control plane (the two logs stay separate authorities this leg).
+
 ---
 
 ## Cross-cutting
