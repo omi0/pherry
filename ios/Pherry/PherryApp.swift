@@ -9,6 +9,7 @@ import UserNotifications
 @main
 struct PherryApp: App {
     @UIApplicationDelegateAdaptor(PherryAppDelegate.self) private var appDelegate
+    @Environment(\.scenePhase) private var scenePhase
     @State private var model = AppModel()
 
     var body: some Scene {
@@ -19,9 +20,27 @@ struct PherryApp: App {
                 .task {
                     appDelegate.connect(to: model)
                     model.bootstrap()
+                    // The door prompt on a cold launch — `.onChange` below covers every
+                    // later foreground return; the session's own guard makes the overlap
+                    // harmless (one evaluation, ever, per foreground session).
+                    await model.presenceDidEnterForeground()
                 }
                 .onOpenURL { url in
                     model.handle(url: url)
+                }
+                // Foreground-session presence (S4 refinement): Face ID at the door on every
+                // return to the foreground, an immediate re-lock the moment the app leaves.
+                // `.inactive` is deliberately ignored — it fires for transient overlays
+                // (notification shade, the Face ID sheet itself) where re-locking would flap.
+                .onChange(of: scenePhase) { _, phase in
+                    switch phase {
+                    case .active:
+                        Task { await model.presenceDidEnterForeground() }
+                    case .background:
+                        model.presenceDidLeaveForeground()
+                    default:
+                        break
+                    }
                 }
         }
     }

@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import LocalAuthentication
 import PherryKit
 import Security
 
@@ -88,12 +89,31 @@ struct DeviceIdentity: DeviceSigner {
     /// For a presence-gated key this call blocks on the system's Face ID / Touch ID / passcode
     /// prompt; a cancel or failure **throws**, which fails the connection's negotiation closed
     /// upstream (`ControllerClient` never sends a `Hello` with a half-made claim — S3's seam).
-    /// There is deliberately no bypass and no cached approval: a retry is a fresh connection,
-    /// which re-prompts.
+    /// There is deliberately no bypass: the only thing that quiets the prompt is a context the
+    /// user *already* evaluated this foreground session (the overload below).
     func sign(message: Data) async throws -> Data {
+        try await sign(message: message, authenticationContext: nil)
+    }
+
+    /// As ``sign(message:)``, but a pre-evaluated `authenticationContext` (the foreground
+    /// session's — see ``PresenceSession``) satisfies a presence-gated key's `.userPresence`
+    /// requirement silently. The context can only ever *satisfy* the access control, never
+    /// weaken it: the enclave verifies the authorization itself, and an invalidated, refused,
+    /// or absent context just means the system's own per-signature prompt. Rebuilding the key
+    /// handle per call is how CryptoKit attaches a context; the wrapped blob never changes.
+    func sign(message: Data, authenticationContext: LAContext?) async throws -> Data {
         switch key {
-        case let .enclave(key): try key.signature(for: message).rawRepresentation
-        case let .software(key): try key.signature(for: message).rawRepresentation
+        case let .enclave(key):
+            if presenceGated, let context = authenticationContext,
+               let scoped = try? SecureEnclave.P256.Signing.PrivateKey(
+                   dataRepresentation: key.dataRepresentation,
+                   authenticationContext: context
+               ) {
+                return try scoped.signature(for: message).rawRepresentation
+            }
+            return try key.signature(for: message).rawRepresentation
+        case let .software(key):
+            return try key.signature(for: message).rawRepresentation
         }
     }
 

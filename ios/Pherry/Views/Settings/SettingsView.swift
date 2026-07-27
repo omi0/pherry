@@ -266,7 +266,7 @@ struct SettingsView: View {
 
     private var rotationWarning: String {
         let mode = model.pendingIdentityRotation == true
-            ? "Face ID will be required every time this phone steers a host."
+            ? "Face ID will be required each time the app comes to the foreground before this phone can steer."
             : "Steering will stop asking for Face ID."
         return mode + " This replaces the device key: the fingerprint changes, every host must re-pair with `pherry dock`, and hosts will refuse this phone until then."
     }
@@ -278,7 +278,7 @@ struct SettingsView: View {
         if !model.deviceIdentity.presenceGatingAvailable {
             return "The Simulator can't require Face ID — presence-gated keys need a real device."
         }
-        return "Hosts enroll this fingerprint when you pair. Flipping the toggle replaces the key — the fingerprint changes and every host must re-pair with `pherry dock`."
+        return "Hosts enroll this fingerprint when you pair. Face ID is asked once each time the app opens; leaving the app locks steering again. Flipping the toggle replaces the key — the fingerprint changes and every host must re-pair with `pherry dock`."
     }
 
     private func confirmRotation() {

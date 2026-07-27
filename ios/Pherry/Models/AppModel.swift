@@ -47,6 +47,18 @@ final class AppModel {
     /// host verifies. Replaced only by ``confirmIdentityRotation()``.
     private(set) var deviceIdentity: DeviceIdentity
 
+    /// The foreground-session presence state: Face ID once at the door per foreground
+    /// session, silence inside, an immediate re-lock on leaving. `PherryApp` drives it from
+    /// `scenePhase` via ``presenceDidEnterForeground()`` / ``presenceDidLeaveForeground()``.
+    let presence: PresenceSession
+
+    /// What every connection signs with: the identity plus the foreground session's
+    /// evaluated context. Reads the live context at each signature, so a lock lands
+    /// immediately — connections never hold a stale authorization.
+    var deviceSigner: any DeviceSigner {
+        PresenceScopedSigner(identity: deviceIdentity, contextBox: presence.contextBox)
+    }
+
     /// A requested presence-gating flip awaiting the user's explicit confirmation — the new
     /// mode the Settings toggle asked for. An enclave key's access control is fixed at
     /// creation, so flipping it is a **key rotation** (new fingerprint, every host must
@@ -76,10 +88,12 @@ final class AppModel {
 
     init(
         keychain: KeychainStore = SystemKeychain(),
-        secureEnclaveAvailable: Bool = SecureEnclave.isAvailable
+        secureEnclaveAvailable: Bool = SecureEnclave.isAvailable,
+        presenceEvaluator: any PresenceEvaluating = SystemPresenceEvaluator()
     ) {
         self.keychain = keychain
         self.secureEnclaveAvailable = secureEnclaveAvailable
+        self.presence = PresenceSession(evaluator: presenceEvaluator)
         self.attention = AttentionStore()
         self.push = PushRegistrar()
         self.calls = CallManager()
@@ -222,7 +236,31 @@ final class AppModel {
         deviceIdentity = try DeviceIdentity.rotate(
             keychain: keychain, presenceGated: mode, secureEnclaveAvailable: secureEnclaveAvailable
         )
+        // Align the presence session with the new mode right away: gating just turned on →
+        // ask for the door prompt now rather than at the next scene transition; turned off →
+        // drop a context nothing needs anymore.
+        if mode {
+            Task { await presence.unlock(gated: true) }
+        } else {
+            presence.lock()
+        }
         return deviceIdentity
+    }
+
+    // MARK: - Foreground presence (scene-phase hooks, called by PherryApp)
+
+    /// Scene became active (or the app just launched): evaluate presence once for this
+    /// foreground session — the "Face ID at the door". No-op for an ungated identity.
+    func presenceDidEnterForeground() async {
+        await presence.unlock(gated: deviceIdentity.presenceGated)
+    }
+
+    /// Scene left for the background — even a one-second app switch drops the session's
+    /// authorization; the next foreground evaluates afresh. Deliberately **not** called on
+    /// `.inactive`, which fires for transient overlays (the notification shade, and the
+    /// Face ID sheet itself — re-locking there would flap or loop).
+    func presenceDidLeaveForeground() {
+        presence.lock()
     }
 
     // MARK: - Push

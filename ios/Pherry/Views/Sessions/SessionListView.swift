@@ -65,7 +65,7 @@ struct SessionListView: View {
                 deviceToken: token,
                 hostId: host.id,
                 pinnedHostStatic: host.staticPublicKey,
-                deviceSigner: model.deviceIdentity
+                deviceSigner: model.deviceSigner
             )
             let sessions = connection.sessions
             await connection.close()
