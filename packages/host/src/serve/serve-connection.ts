@@ -42,6 +42,12 @@
  *    the matching {@link ServeConnectionOptions} hook is injected; otherwise they
  *    reply `METHOD_NOT_FOUND` like any unsupported method. `custody.claim` is
  *    async, and its rejections are mapped to coded failures (never left dangling).
+ *  - `launch.options` / `launch.start` (the constrained remote launch, leg-P3e)
+ *    are gated twice: on the negotiated `launch.v1` capability (de-negotiated ->
+ *    `FORBIDDEN`) and on the injected {@link LaunchHooks} (absent ->
+ *    `METHOD_NOT_FOUND`). A hook's {@link LaunchRefusedError} becomes the one
+ *    undifferentiated `INVALID_ARGUMENT` refusal; any other hook throw is an
+ *    `INTERNAL` with no detail on the wire.
  *  - an unknown method replies `METHOD_NOT_FOUND`; a missing session replies
  *    `NOT_FOUND`; malformed params reply `INVALID_ARGUMENT`.
  *
@@ -91,8 +97,14 @@ const DEFAULT_NEGOTIATION_TIMEOUT_MS = 10_000
  * The mirror-and-steer capability surface this host leg serves by default: it
  * streams the PTY mirror ({@link PTY_STREAM}) with an initial snapshot
  * ({@link MIRROR_SNAPSHOT}) and accepts input / resize ({@link SESSION_INPUT}).
+ * Exported so a daemon that opts into more (the CLI adds `launch.v1`) composes
+ * from this one list instead of restating it.
  */
-const DEFAULT_SERVED_CAPABILITIES: readonly string[] = [PTY_STREAM, MIRROR_SNAPSHOT, SESSION_INPUT]
+export const DEFAULT_SERVED_CAPABILITIES: readonly string[] = [
+  PTY_STREAM,
+  MIRROR_SNAPSHOT,
+  SESSION_INPUT,
+]
 
 /** One live subscription created by this connection. */
 interface Subscription {
@@ -115,6 +127,44 @@ export interface CustodyHooks {
   reserve(spec: ParamsOf<'custody.reserve'>): ResultOf<'custody.reserve'>
   /** Claim a prior reservation, spawning the agent under custody. */
   claim(sessionRef: SessionRef): Promise<void>
+}
+
+/** The fixed, undifferentiated refusal message for an unknown launch selection. */
+const LAUNCH_REFUSED_MESSAGE = 'launch: unknown selection'
+
+/**
+ * Thrown by a {@link LaunchHooks} implementation when a submitted
+ * `projectId` / `agentId` / `modelId` does not join against the host's current
+ * allowlists. The dispatcher maps it to a single `INVALID_ARGUMENT` failure
+ * with the fixed message `launch: unknown selection` — deliberately
+ * undifferentiated, so a probing controller learns nothing about which id was
+ * wrong or what the host's lists contain.
+ */
+export class LaunchRefusedError extends Error {
+  constructor() {
+    super(LAUNCH_REFUSED_MESSAGE)
+    this.name = 'LaunchRefusedError'
+  }
+}
+
+/**
+ * Injected launch operations backing the **constrained** remote-launch methods
+ * `launch.options` / `launch.start` (leg-P3e). Unlike {@link CustodyHooks}'
+ * reserve — which carries caller-chosen argv/cwd/env and therefore never leaves
+ * the local unix socket — these accept **identifiers only**: the daemon that
+ * supplies them joins the ids against allowlists it alone composes (its boarded
+ * projects, its PATH-detected agents) and builds the argv itself. Hook presence
+ * gates the methods exactly as {@link custody} gates its pair: absent ->
+ * `METHOD_NOT_FOUND`; and both methods additionally require the negotiated
+ * `launch.v1` capability (de-negotiated -> `FORBIDDEN`). `start` refuses an
+ * unknown or stale id by throwing {@link LaunchRefusedError}; any other throw
+ * is surfaced as `INTERNAL` with no path/argv detail on the wire.
+ */
+export interface LaunchHooks {
+  /** The host-composed allowlists: boarded projects × PATH-detected agents. May be sync. */
+  options(): ResultOf<'launch.options'> | Promise<ResultOf<'launch.options'>>
+  /** Join the ids, compose the argv, spawn under custody; resolves the new session's ref. */
+  start(params: ParamsOf<'launch.start'>): Promise<ResultOf<'launch.start'>>
 }
 
 /**
@@ -160,6 +210,15 @@ export interface ServeConnectionOptions {
    * whatever this returns; when absent it answers `METHOD_NOT_FOUND`.
    */
   listSessions?: () => ResultOf<'sessions.list'>['sessions']
+  /**
+   * Constrained remote-launch operations (leg-P3e). **Presence gates the
+   * methods** — the same seam pattern as {@link custody}: when present,
+   * `launch.options` / `launch.start` are served (still behind the negotiated
+   * `launch.v1` capability, which is NOT in the default served set — a daemon
+   * that offers launch passes it via {@link capabilities} explicitly); when
+   * absent both answer `METHOD_NOT_FOUND` like any other unsupported method.
+   */
+  launch?: LaunchHooks
   /**
    * The capabilities this connection advertises in its HelloAck and enforces — the
    * negotiated set is the intersection with the controller's {@link Hello}.
@@ -539,6 +598,44 @@ export function serveConnection(
     }
   }
 
+  /**
+   * Map a launch hook throw: a {@link LaunchRefusedError} is the one
+   * undifferentiated `INVALID_ARGUMENT` refusal (fixed message — no oracle over
+   * the host's lists); anything else is `INTERNAL` with a generic message,
+   * never a path, argv, or hook detail, routed through `onError` locally.
+   */
+  const sendLaunchFailure = (id: string, error: unknown): void => {
+    if (error instanceof LaunchRefusedError) {
+      send(failure(id, ErrorCode.InvalidArgument, LAUNCH_REFUSED_MESSAGE))
+      return
+    }
+    options.onError?.(asError(error))
+    send(failure(id, ErrorCode.Internal, 'internal error handling request'))
+  }
+
+  // Async like handleClaim: self-contained error handling, so the
+  // fire-and-forget calls in `dispatch` can never leave an unhandled rejection.
+  // `options()` may be sync or async — normalized through Promise.resolve.
+  const handleLaunchOptions = async (id: string, launch: LaunchHooks): Promise<void> => {
+    try {
+      send(success(id, await Promise.resolve(launch.options())))
+    } catch (error) {
+      sendLaunchFailure(id, error)
+    }
+  }
+
+  const handleLaunchStart = async (
+    id: string,
+    params: ParamsOf<'launch.start'>,
+    launch: LaunchHooks,
+  ): Promise<void> => {
+    try {
+      send(success(id, await launch.start(params)))
+    } catch (error) {
+      sendLaunchFailure(id, error)
+    }
+  }
+
   const dispatch = (request: RpcRequest): void => {
     const method = request.method
     if (!isMethod(method)) {
@@ -590,6 +687,22 @@ export function serveConnection(
           return
         }
         send(success(request.id, { sessions: options.listSessions() }))
+        return
+      case 'launch.options':
+        if (!capabilityAllows(request.id, method)) return
+        if (!options.launch) {
+          send(failure(request.id, ErrorCode.MethodNotFound, `unsupported method: ${method}`))
+          return
+        }
+        void handleLaunchOptions(request.id, options.launch)
+        return
+      case 'launch.start':
+        if (!capabilityAllows(request.id, method)) return
+        if (!options.launch) {
+          send(failure(request.id, ErrorCode.MethodNotFound, `unsupported method: ${method}`))
+          return
+        }
+        void handleLaunchStart(request.id, parsed.data as ParamsOf<'launch.start'>, options.launch)
         return
       default:
         // A valid method this host leg does not serve (approve / sandbox / attention).

@@ -38,6 +38,16 @@
  * `sessionRef` defaults to the daemon's latest live session (the daemon holds the
  * registry, so no RPC is needed). A control-plane failure never crashes the daemon —
  * the local custody path is unaffected. An **undocked** daemon opens nothing.
+ *
+ * ## Constrained remote launch (P3e)
+ *
+ * Both front doors also serve the identifier-only launch hooks
+ * ({@link buildLaunchHooks}): `launch.options` advertises the boarded projects
+ * and PATH-detected agents, `launch.start` spawns a host-composed spec through
+ * the **same** reserve -> claim path a shim launch takes. The relay leg serves
+ * them only past the S3 device gate, and every start lands a `launch` audit
+ * line bound to the caller's identity — `local` on the unix socket, the
+ * verified claim's `deviceKeyId` over the relay.
  */
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { chmod, unlink, writeFile } from 'node:fs/promises'
@@ -46,9 +56,11 @@ import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { type Duplex, SecureChannel } from '@pherry/channel'
 import {
+  type AgentAdapter,
   type Backend,
   CustodyDesk,
   type CustodyHooks,
+  DEFAULT_SERVED_CAPABILITIES,
   LocalPtyBackend,
   type Session,
   SessionRegistry,
@@ -57,6 +69,7 @@ import {
 } from '@pherry/host'
 import {
   AttentionEvent,
+  LAUNCH,
   PtyOpcode,
   type SessionInfo,
   type SessionRef,
@@ -77,6 +90,7 @@ import {
 import { buildVerifyDevice } from '../device-keyring.js'
 import { type DockConfig, readDockConfig } from '../dock-config.js'
 import { defaultHostKeyDir, loadOrCreateHostKey } from '../host-key.js'
+import { type DetectCache, type LaunchSpawner, buildLaunchHooks } from '../launch.js'
 import { hostPidPath, hostSocketPath } from '../paths.js'
 
 /** How long, in ms, an unclaimed custody reservation stays claimable by default. */
@@ -84,6 +98,15 @@ const DEFAULT_RESERVE_TTL_MS = 30_000
 
 /** Cap on buffered `ended` session reports awaiting a successful heartbeat drain. */
 const MAX_ENDED_REPORTS = 256
+
+/**
+ * The capability surface both front doors advertise: `serveConnection`'s
+ * mirror-and-steer default plus the constrained remote-launch capability
+ * (leg-P3e). {@link LAUNCH} is deliberately NOT in `serveConnection`'s own
+ * defaults — a leg opts in exactly when it wires {@link buildLaunchHooks},
+ * which this daemon does on both legs.
+ */
+const SERVED_CAPABILITIES: readonly string[] = [...DEFAULT_SERVED_CAPABILITIES, LAUNCH]
 
 /**
  * Test seam for the relay uplink (§1 of leg-P2c). Every field is optional and only
@@ -101,6 +124,18 @@ export interface ServeUplinkOptions {
   backoff?: { initialMs?: number; maxMs?: number; factor?: number }
   /** Observe the uplink's lifecycle transitions. */
   onStateChange?: (state: RelayUplinkState, error?: Error) => void
+}
+
+/**
+ * Test/config seam for the constrained launch hooks (leg-P3e). Production leaves
+ * it unset: detection probes the daemon's own shim-free PATH and the composed
+ * spec inherits the daemon's environment.
+ */
+export interface ServeLaunchOptions {
+  /** Agent-availability probe override (tests). Defaults to the shim-free PATH probe. */
+  detectAgent?: (adapter: AgentAdapter) => boolean | Promise<boolean>
+  /** Environment the launch composition starts from. Defaults to `process.env`. */
+  env?: Record<string, string | undefined>
 }
 
 /**
@@ -129,6 +164,8 @@ export interface ServeOptions {
   uplink?: ServeUplinkOptions
   /** Test/config seam for the attention hook; ignored entirely when the daemon is not docked. */
   attentionHook?: ServeAttentionHookOptions
+  /** Test/config seam for the constrained launch hooks (leg-P3e). */
+  launch?: ServeLaunchOptions
 }
 
 /** A running custody daemon. */
@@ -197,23 +234,19 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     void appendAudit(event, baseDir)
   }
 
-  const custody: CustodyHooks = {
+  // The one reserve -> claim implementation every spawn on this daemon goes
+  // through — shim custody and the constrained remote launch (leg-P3e) alike:
+  // reservation bookkeeping for listing/heartbeats, a distinct stream id per
+  // claim, and the end-watch that unlists the session and buffers its `ended`
+  // report. The custody and launch hooks below only add their own audit lines.
+  const spawner: LaunchSpawner = {
     reserve(spec) {
       desk.sweepExpired()
-      const reservation = desk.reserveOpenSession(spec as SessionSpec, reserveTtlMs)
+      const reservation = desk.reserveOpenSession(spec, reserveTtlMs)
       launches.set(reservation.ref, { argv: spec.argv, cwd: spec.cwd, startedAt: now() })
-      // Custody is local-socket-only (H1), so the actor is the filesystem-
-      // trusted local identity, attributed as such.
-      audit({
-        kind: 'custody-reserve',
-        deviceKeyId: 'local',
-        transport: 'local',
-        detail: reservation.ref,
-      })
       return { sessionRef: reservation.ref, expiresAt: reservation.expiresAt }
     },
     async claim(sessionRef) {
-      audit({ kind: 'custody-claim', deviceKeyId: 'local', transport: 'local', detail: sessionRef })
       const session = await desk.claimOpenSession(sessionRef, backend, { streamId: nextStreamId++ })
       // When the process ends, drop the session so it stops being listed/mirrored,
       // and remember it for the next heartbeat's `ended` report.
@@ -234,6 +267,43 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
       })
     },
   }
+
+  const custody: CustodyHooks = {
+    reserve(spec) {
+      const reservation = spawner.reserve(spec as SessionSpec)
+      // Custody is local-socket-only (H1), so the actor is the filesystem-
+      // trusted local identity, attributed as such.
+      audit({
+        kind: 'custody-reserve',
+        deviceKeyId: 'local',
+        transport: 'local',
+        detail: reservation.sessionRef,
+      })
+      return reservation
+    },
+    async claim(sessionRef) {
+      audit({ kind: 'custody-claim', deviceKeyId: 'local', transport: 'local', detail: sessionRef })
+      await spawner.claim(sessionRef)
+    },
+  }
+
+  // The constrained remote-launch hooks (leg-P3e): identifiers in, host-composed
+  // argv out, spawned through the same `spawner` path as custody. ONE probe
+  // cache is shared by every hook build — the relay leg builds per connection —
+  // so a reconnect or the local leg never re-probes inside the window.
+  const detectCache: DetectCache = new Map()
+  const launchSeam = options.launch ?? {}
+  const localLaunch = buildLaunchHooks({
+    baseDir,
+    spawner,
+    detectCache,
+    now,
+    detectAgent: launchSeam.detectAgent,
+    env: launchSeam.env,
+    // Local socket: trust-by-filesystem, so a launch is attributed `local`
+    // exactly like the custody actions above.
+    audit: (detail) => audit({ kind: 'launch', deviceKeyId: 'local', transport: 'local', detail }),
+  })
 
   const listSessions = (): SessionInfo[] =>
     registry.list().map((session) => {
@@ -260,7 +330,12 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
       channels.add(channel)
       // Trust-by-filesystem at the socket's 0600 — recorded as such (S4).
       audit({ kind: 'connection-local', deviceKeyId: 'local', transport: 'local' })
-      const served = serveConnection(channel, registry, { custody, listSessions })
+      const served = serveConnection(channel, registry, {
+        custody,
+        listSessions,
+        launch: localLaunch,
+        capabilities: SERVED_CAPABILITIES,
+      })
       // Replaces serveConnection's own onClose with one that still tears the
       // subscriptions down (served.close() is idempotent) and also forgets the
       // channel, so a long-lived daemon does not accrue dead channel refs.
@@ -329,6 +404,9 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
           // "the shim/`open` is the only caller" — so it is served on the local
           // unix socket ONLY (above), never over the org-scoped relay ticket.
           // Remote spawn for cloud hosts is the separate `sandbox.spawn` method.
+          // The CONSTRAINED launch hooks (leg-P3e) are different: identifiers
+          // only, joined against host-composed allowlists — so they ARE served
+          // here, but only past the device gate below.
           //
           // Device gate (S3): every remote steer must prove an ENROLLED device
           // key over this machine's keyring (`~/.pherry/devices.json`). The
@@ -339,10 +417,17 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
           // claimed deviceKeyId — lands in ~/.pherry/audit.log either way, so a
           // refused stranger is evidence, not silence.
           const verifyDevice = buildVerifyDevice(dock.hostId, baseDir)
+          // The verified claim's identity, captured for the launch audit. The
+          // phase machine dispatches no method until `verifyDevice` resolves,
+          // so a launch hook can never run before this is set; the fallback is
+          // therefore unreachable, kept only so a bug degrades to evidence.
+          let verifiedDeviceKeyId: string | null = null
           const served = serveConnection(channel, registry, {
             listSessions,
+            capabilities: SERVED_CAPABILITIES,
             verifyDevice: async (claim) => {
               const allowed = await verifyDevice(claim)
+              if (allowed) verifiedDeviceKeyId = claim.deviceKeyId
               audit({
                 kind: allowed ? 'connection-accepted' : 'connection-refused',
                 deviceKeyId: claim.deviceKeyId,
@@ -350,6 +435,23 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
               })
               return allowed
             },
+            launch: buildLaunchHooks({
+              baseDir,
+              spawner,
+              detectCache,
+              now,
+              detectAgent: launchSeam.detectAgent,
+              env: launchSeam.env,
+              // Relay: a launch is attributed to the enrolled device that
+              // passed the gate on THIS connection.
+              audit: (detail) =>
+                audit({
+                  kind: 'launch',
+                  deviceKeyId: verifiedDeviceKeyId ?? 'unverified',
+                  transport: 'relay',
+                  detail,
+                }),
+            }),
           })
           // Same onClose bookkeeping as a local connection.
           channel.onClose(() => {

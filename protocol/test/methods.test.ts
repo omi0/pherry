@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  LAUNCH,
   METHODS,
   METHOD_CAPABILITY,
   PTY_STREAM,
@@ -122,6 +123,22 @@ describe('METHODS registry', () => {
     expect(METHODS['sessions.list'].result.safeParse({ sessions: [] }).success).toBe(true)
     expect(METHODS['sessions.list'].result.safeParse({}).success).toBe(false)
   })
+
+  it('launch.options: empty params in, host allowlists out', () => {
+    expect(METHODS['launch.options'].params.safeParse({}).success).toBe(true)
+    expect(METHODS['launch.options'].result.safeParse({ projects: [], agents: [] }).success).toBe(
+      true,
+    )
+    expect(METHODS['launch.options'].result.safeParse({}).success).toBe(false)
+  })
+
+  it('launch.start: identifier selection in, session ref out', () => {
+    expect(
+      METHODS['launch.start'].params.safeParse({ projectId: 'p1', agentId: 'claude' }).success,
+    ).toBe(true)
+    expect(METHODS['launch.start'].result.safeParse({ sessionRef: sref }).success).toBe(true)
+    expect(METHODS['launch.start'].params.safeParse({ projectId: 'p1' }).success).toBe(false)
+  })
 })
 
 describe('METHOD_CAPABILITY — the method -> required-capability gate', () => {
@@ -129,6 +146,8 @@ describe('METHOD_CAPABILITY — the method -> required-capability gate', () => {
     expect(requiredCapability('session.subscribe')).toBe(PTY_STREAM)
     expect(requiredCapability('session.input')).toBe(SESSION_INPUT)
     expect(requiredCapability('session.resize')).toBe(SESSION_INPUT)
+    expect(requiredCapability('launch.options')).toBe(LAUNCH)
+    expect(requiredCapability('launch.start')).toBe(LAUNCH)
     expect(METHOD_CAPABILITY['session.subscribe']).toBe(PTY_STREAM)
   })
 

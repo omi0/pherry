@@ -121,7 +121,17 @@ export type {
 // The custody daemon (leg 3c): the always-on host the shims talk to, plus the
 // `open` / `sessions` / `dock` commands built on top of it.
 export { startServe, stopServe } from './commands/serve.js'
-export type { ServeOptions, ServeHandle, StopResult } from './commands/serve.js'
+export type { ServeLaunchOptions, ServeOptions, ServeHandle, StopResult } from './commands/serve.js'
+
+// P3e — the constrained remote-launch hook builder: identifiers in, host-composed
+// argv out, spawned through the daemon's shared custody path.
+export { DETECT_CACHE_TTL_MS, buildLaunchHooks, projectId } from './launch.js'
+export type {
+  BuildLaunchHooksArgs,
+  DetectCache,
+  DetectCacheEntry,
+  LaunchSpawner,
+} from './launch.js'
 export { runOpen } from './commands/open.js'
 export type { ExecFallbackRunner, OpenOptions, OpenResult } from './commands/open.js'
 export { runSessions } from './commands/sessions.js'

@@ -1,8 +1,9 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { type Duplex, SecureChannel } from '@pherry/channel'
 import { FakeBackend } from '@pherry/host'
+import { LAUNCH, MIRROR_SNAPSHOT, PTY_STREAM, SESSION_INPUT } from '@pherry/protocol'
 import {
   type Cell,
   type RelayAuthorizer,
@@ -15,14 +16,15 @@ import {
   relayChannelContext,
 } from '@pherry/relay-core'
 import { Controller, type DeviceSigner } from '@pherry/sdk'
+import { connectUnix } from '@pherry/transport-node'
 import { afterEach, describe, expect, it } from 'vitest'
 import { readAudit } from '../src/audit-log.js'
 import { connectDaemon } from '../src/daemon/client.js'
 import { deviceSignerFor, loadOrCreateDeviceKey } from '../src/device-key.js'
 import { writeAuthorizedDevice } from '../src/device-keyring.js'
 import { writeDockConfig } from '../src/dock-config.js'
-import { loadOrCreateHostKey } from '../src/host-key.js'
-import { startServe } from '../src/index.js'
+import { loadOrCreateHostKey, readHostPublicKey } from '../src/host-key.js'
+import { type ServeOptions, addToBoardedList, hostSocketPath, startServe } from '../src/index.js'
 import { delay, recordingBackend, waitFor } from './daemon-harness.js'
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s)
@@ -175,7 +177,11 @@ async function connectController(
   ticket: string,
   hostId: string,
   hostPublicKey: Uint8Array,
-  options: { contextTicket?: string; deviceSigner?: DeviceSigner } = {},
+  options: {
+    contextTicket?: string
+    deviceSigner?: DeviceSigner
+    capabilities?: readonly string[]
+  } = {},
 ): Promise<{ controller: Controller; channel: SecureChannel }> {
   const duplex = await connectViaCell({ connect: () => cell.connectInProcess(), ticket })
   const channel = new SecureChannel({
@@ -186,10 +192,10 @@ async function connectController(
   })
   // A relay controller signs the device-auth statement (S3); a test that wants
   // to model an unenrolled device simply omits the signer.
-  const controller = new Controller(
-    channel,
-    options.deviceSigner ? { hostId, deviceSigner: options.deviceSigner } : {},
-  )
+  const controller = new Controller(channel, {
+    ...(options.deviceSigner ? { hostId, deviceSigner: options.deviceSigner } : {}),
+    ...(options.capabilities ? { capabilities: options.capabilities } : {}),
+  })
   cleanups.push(() => controller.close())
   await channel.ready()
   return { controller, channel }
@@ -212,6 +218,7 @@ async function startDocked(
     connect?: (cell: Cell) => () => Duplex | Promise<Duplex>
     fetchFail?: boolean
     heartbeatIntervalMs?: number
+    launch?: ServeOptions['launch']
   } = {},
 ) {
   const baseDir = await mkdtemp(join(tmpdir(), 'ph-'))
@@ -235,6 +242,7 @@ async function startDocked(
     baseDir,
     backend: rec.backend,
     now: () => NOW,
+    ...(opts.launch ? { launch: opts.launch } : {}),
     uplink: {
       connect,
       fetchImpl: recordingFetch(fetchCalls, { fail: opts.fetchFail === true }),
@@ -388,6 +396,143 @@ describe('serve — the outbound relay uplink (leg-P2c §1)', () => {
     await expect(controller.request('custody.reserve', spec)).rejects.toThrow(/unsupported method/)
     await expect(controller.request('custody.claim', { sessionRef })).rejects.toThrow(
       /unsupported method/,
+    )
+  })
+
+  /** The controller capability set that also asks for the constrained launch. */
+  const LAUNCH_CAPABILITIES: readonly string[] = [
+    PTY_STREAM,
+    MIRROR_SNAPSHOT,
+    SESSION_INPUT,
+    LAUNCH,
+  ]
+
+  /**
+   * Provision the launch fixtures around a docked daemon (leg-P3e): an
+   * executable stand-in `claude` on its own PATH dir (the daemon's injected
+   * launch env, with detection injected to see only claude) and a boarded repo
+   * — boarded AFTER the daemon started, proving `launch.options` reads fresh.
+   */
+  async function startDockedForLaunch() {
+    const binDir = await mkdtemp(join(tmpdir(), 'ph-bin-'))
+    cleanups.push(() => rm(binDir, { recursive: true, force: true }))
+    const claudeBin = join(binDir, 'claude')
+    await writeFile(claudeBin, '#!/bin/sh\nexit 0\n')
+    await chmod(claudeBin, 0o755)
+    const docked = await startDocked({
+      launch: { detectAgent: (adapter) => adapter.id === 'claude', env: { PATH: binDir } },
+    })
+    const repo = join(docked.baseDir, 'work')
+    await mkdir(repo, { recursive: true })
+    await addToBoardedList(repo, docked.baseDir)
+    return { ...docked, claudeBin, repo }
+  }
+
+  it('launch (leg-P3e): an ENROLLED device starts a known agent in a boarded repo', async () => {
+    const { baseDir, cell, dock, inner, rec, issueTicket, claudeBin, repo } =
+      await startDockedForLaunch()
+
+    const { controller } = await connectController(
+      cell,
+      issueTicket(),
+      dock.hostId,
+      dock.hostPublicKey,
+      { deviceSigner: dock.deviceSigner, capabilities: LAUNCH_CAPABILITIES },
+    )
+    // The channel negotiated launch.v1 — the daemon now advertises it.
+    expect((await controller.negotiated()).active.has(LAUNCH)).toBe(true)
+
+    // launch.options: exactly the boarded repo and the injected-detected agent.
+    const options = await controller.request('launch.options', {})
+    expect(options.projects.map((p) => p.path)).toEqual([repo])
+    expect(options.agents.map((a) => a.id)).toEqual(['claude'])
+    expect(options.agents[0]?.models[0]?.id).toBe('default')
+    const project = options.projects[0]
+    if (!project) throw new Error('no project advertised')
+
+    // An unknown selection is the one undifferentiated refusal, on the wire.
+    await expect(
+      controller.request('launch.start', { projectId: 'ffffffffffffffff', agentId: 'claude' }),
+    ).rejects.toThrow(/unknown selection/)
+
+    // launch.start: identifiers only -> a host-composed spawn.
+    const { sessionRef } = await controller.request('launch.start', {
+      projectId: project.id,
+      agentId: 'claude',
+      modelId: 'sonnet',
+      prompt: 'summarize the failing test',
+    })
+    const spawned = inner.specOf(rec.lastSpawned())
+    expect(spawned.argv).toEqual([claudeBin, '--model', 'sonnet', 'summarize the failing test'])
+    expect(spawned.cwd).toBe(repo)
+    expect(spawned.env.PHERRY_LOCAL_ID).toBeDefined()
+
+    // The session landed in the SAME registry: both front doors list it, and
+    // the relay controller can mirror it.
+    const relayList = await controller.request('sessions.list', {})
+    expect(relayList.sessions.map((s) => s.sessionRef)).toContain(sessionRef)
+    const local = await connectDaemon(baseDir)
+    cleanups.push(() => local.close())
+    const localList = await local.request('sessions.list', {})
+    expect(localList.sessions.map((s) => s.sessionRef)).toContain(sessionRef)
+    const events = (await controller.subscribe(sessionRef)).events[Symbol.asyncIterator]()
+    expect((await events.next()).value?.kind).toBe('snapshot')
+
+    // S4: the launch landed one audit line with the device's REAL key id.
+    await waitFor(async () =>
+      (await readAudit(baseDir)).some(
+        (e) =>
+          e.kind === 'launch' &&
+          e.deviceKeyId === dock.deviceSigner.deviceKeyId &&
+          e.transport === 'relay' &&
+          e.detail === 'claude:sonnet in work',
+      ),
+    )
+
+    // H1 unchanged: the relay still refuses custody...
+    await expect(controller.request('custody.reserve', spec)).rejects.toThrow(/unsupported method/)
+    // ...while the local socket still serves it (audit appends are async,
+    // best-effort — poll).
+    const { sessionRef: custodyRef } = await createLocalSession(baseDir)
+    await waitFor(async () =>
+      (await readAudit(baseDir)).some(
+        (e) => e.kind === 'custody-reserve' && e.detail === custodyRef,
+      ),
+    )
+  })
+
+  it('launch (leg-P3e): the local socket serves the same surface, attributed local', async () => {
+    const { baseDir, inner, rec, claudeBin, repo } = await startDockedForLaunch()
+
+    // A LAUNCH-advertising controller on the trust-by-filesystem unix socket
+    // (connectDaemon asks only for the default steer set, so dial explicitly).
+    const pinned = await readHostPublicKey(baseDir)
+    const duplex = await connectUnix(hostSocketPath(baseDir))
+    const channel = new SecureChannel({ role: 'initiator', duplex, pinnedHostStatic: pinned })
+    const local = new Controller(channel, { capabilities: LAUNCH_CAPABILITIES })
+    cleanups.push(() => local.close())
+    await channel.ready()
+
+    const options = await local.request('launch.options', {})
+    const project = options.projects.find((p) => p.path === repo)
+    if (!project) throw new Error('boarded repo not advertised')
+    const { sessionRef } = await local.request('launch.start', {
+      projectId: project.id,
+      agentId: 'claude',
+    })
+    expect(inner.specOf(rec.lastSpawned()).argv).toEqual([claudeBin])
+    const { sessions } = await local.request('sessions.list', {})
+    expect(sessions.map((s) => s.sessionRef)).toContain(sessionRef)
+
+    // The audit line is bound to the local identity — no device claim here.
+    await waitFor(async () =>
+      (await readAudit(baseDir)).some(
+        (e) =>
+          e.kind === 'launch' &&
+          e.deviceKeyId === 'local' &&
+          e.transport === 'local' &&
+          e.detail === 'claude in work',
+      ),
     )
   })
 

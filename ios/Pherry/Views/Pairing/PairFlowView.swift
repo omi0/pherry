@@ -341,9 +341,15 @@ struct PairFlowView: View {
             } catch let refusal as PairRefusal {
                 Haptics.warning()
                 step = .failed(Self.message(for: refusal))
+            } catch let error as APIError {
+                Haptics.warning()
+                step = .failed(Self.message(for: error))
+            } catch let error as URLError {
+                Haptics.warning()
+                step = .failed(Self.message(for: error, api: apiUrl))
             } catch {
                 Haptics.warning()
-                step = .failed("Docking failed — the link may be expired. Mint a fresh one with `pherry dock`.")
+                step = .failed("Docking failed unexpectedly — try again, or mint a fresh link with `pherry dock`.")
             }
         }
     }
@@ -356,6 +362,33 @@ struct PairFlowView: View {
             "The control plane answered for a different host than this link names. Refusing to dock."
         case .repinRefused:
             "This link would replace a docked host's pinned key. Un-dock the host first if you meant to."
+        }
+    }
+
+    /// The control plane answered, and said no. Its redeem refusal is deliberately one
+    /// undifferentiated code (enumeration resistance), so the copy hedges between expired and
+    /// already-used; a 5xx is its own honest story rather than the link's fault.
+    private static func message(for error: APIError) -> String {
+        error.status >= 500
+            ? "The control plane hit a problem (\(error.status)) — try again in a moment."
+            : "The control plane refused this link — it may be expired or already used. Mint a fresh one with `pherry dock`."
+    }
+
+    /// The network never delivered an answer — say so instead of blaming the link. (The 2026-07
+    /// device pass hit exactly this: a TLS trust failure surfaced as "the link may be expired".)
+    private static func message(for error: URLError, api: URL) -> String {
+        switch error.code {
+        case .serverCertificateUntrusted, .serverCertificateHasBadDate,
+             .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid, .secureConnectionFailed:
+            "This device doesn't trust \(PairPolicy.origin(of: api))'s TLS certificate. For a dev control plane, install the mkcert root CA and fully trust it in Settings."
+        case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed:
+            "No network — check this device's connection and try again."
+        case .cannotFindHost, .dnsLookupFailed:
+            "Couldn't find \(PairPolicy.origin(of: api)) — check the control-plane address."
+        case .cannotConnectToHost, .timedOut:
+            "Couldn't reach \(PairPolicy.origin(of: api)) — is the control plane up and reachable from this network?"
+        default:
+            "A network error stopped the dock — check the connection to \(PairPolicy.origin(of: api)) and try again."
         }
     }
 

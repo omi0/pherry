@@ -37,6 +37,8 @@ export type AuditKind =
   | 'connection-local'
   | 'custody-reserve'
   | 'custody-claim'
+  /** A constrained remote launch (leg-P3e); `detail` is `<agent>[:<model>] in <project>`. */
+  | 'launch'
   | 'device-enrolled'
   | 'device-revoked'
 

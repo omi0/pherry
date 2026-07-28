@@ -15,6 +15,7 @@ export {
   ATTENTION,
   FOLLOW_CUSTODY,
   KNOWN_CAPABILITIES,
+  LAUNCH,
   MIRROR_SNAPSHOT,
   PTY_STREAM,
   SANDBOX,
@@ -60,6 +61,16 @@ export {
   SessionInfo,
   SessionList,
 } from './schemas/custody.js'
+
+// Launch
+export {
+  LaunchAgent,
+  LaunchModel,
+  LaunchOptions,
+  LaunchProject,
+  LaunchStartParams,
+  LaunchStartResult,
+} from './schemas/launch.js'
 
 // Handshake
 export { Hello, HelloAck, Role, negotiateHello } from './handshake.js'

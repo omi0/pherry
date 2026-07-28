@@ -122,6 +122,52 @@ public actor ControllerClient {
         return items.compactMap(Self.parseSummary)
     }
 
+    /// Fetch the host's constrained-launch allowlists (leg-P3e): its boarded projects and
+    /// PATH-detected agents, ids the phone can hand back to ``launchStart``. Served only on a
+    /// negotiated `launch.v1` capability (an older host answers `METHOD_NOT_FOUND` /
+    /// `FORBIDDEN`, surfaced as an ``RpcClientError``).
+    public func launchOptions() async throws -> LaunchOptions {
+        let result = try await send(method: "launch.options", params: [:])
+        let projects = (result["projects"] as? [[String: Any]]) ?? []
+        let agents = (result["agents"] as? [[String: Any]]) ?? []
+        return LaunchOptions(
+            projects: projects.compactMap(Self.parseProject),
+            agents: agents.compactMap(Self.parseAgent)
+        )
+    }
+
+    /// Start a known agent in a boarded project on the host (leg-P3e's constrained launch)
+    /// and return the new session's ref. Only **identifiers** from ``launchOptions`` ride the
+    /// wire — never a path, argv, or env; the host composes the argv itself. A `nil`
+    /// `modelId` / `prompt` is omitted from the params entirely (absent means the agent's
+    /// default model / no prompt — never null). An unknown or stale id is refused by the host
+    /// with one undifferentiated `INVALID_ARGUMENT`.
+    public func launchStart(
+        projectId: String,
+        agentId: String,
+        modelId: String?,
+        prompt: String?,
+        cols: Int,
+        rows: Int
+    ) async throws -> String {
+        var params: [String: Any] = [
+            "projectId": projectId,
+            "agentId": agentId,
+            "cols": cols,
+            "rows": rows,
+        ]
+        if let modelId { params["modelId"] = modelId }
+        if let prompt { params["prompt"] = prompt }
+        let result = try await send(method: "launch.start", params: params)
+        guard let sessionRef = result["sessionRef"] as? String else {
+            throw RpcClientError(
+                code: "UNAVAILABLE",
+                message: "launch.start: host answered without a sessionRef"
+            )
+        }
+        return sessionRef
+    }
+
     /// Subscribe to `sessionRef`'s mirror at the given viewport. Resolves once the host acks,
     /// with a decoded event stream that delivers a `snapshot` first, then live events.
     public func subscribe(sessionRef: String, cols: Int, rows: Int) async throws -> Subscription {
@@ -375,6 +421,38 @@ public actor ControllerClient {
         return SessionSummary(
             sessionRef: sessionRef, cols: cols, rows: rows,
             argv: argv, cwd: cwd, subscribers: subscribers
+        )
+    }
+
+    private static func parseProject(_ item: [String: Any]) -> LaunchProject? {
+        guard
+            let id = item["id"] as? String,
+            let name = item["name"] as? String,
+            let path = item["path"] as? String
+        else { return nil }
+        return LaunchProject(id: id, name: name, path: path)
+    }
+
+    private static func parseModel(_ item: [String: Any]) -> LaunchModel? {
+        guard
+            let id = item["id"] as? String,
+            let name = item["name"] as? String
+        else { return nil }
+        return LaunchModel(id: id, name: name)
+    }
+
+    private static func parseAgent(_ item: [String: Any]) -> LaunchAgentOption? {
+        guard
+            let id = item["id"] as? String,
+            let name = item["name"] as? String,
+            let models = item["models"] as? [[String: Any]]
+        else { return nil }
+        return LaunchAgentOption(
+            id: id,
+            name: name,
+            models: models.compactMap(parseModel),
+            // Absent means supported — the wire's default.
+            promptSupported: (item["promptSupported"] as? Bool) ?? true
         )
     }
 

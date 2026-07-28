@@ -99,6 +99,57 @@ public struct ControlPlaneClient: Sendable {
         )
     }
 
+    // MARK: - Hosts
+
+    /// One paired host as `GET /v1/hosts` returns it — the subset the phone needs for the
+    /// sessions tab's host pills (leg-P3e): id, display name, and the last heartbeat that
+    /// drives the client-side liveness rule (seen within 90 s ⇒ online, the dashboard's window).
+    public struct HostSummary: Sendable, Equatable {
+        /// The `host_…` id.
+        public let id: String
+        /// The host's display name.
+        public let name: String
+        /// The last control-plane heartbeat, or `nil` if the host has never checked in.
+        public let lastSeenAt: Date?
+
+        /// Build a host summary.
+        public init(id: String, name: String, lastSeenAt: Date?) {
+            self.id = id
+            self.name = name
+            self.lastSeenAt = lastSeenAt
+        }
+    }
+
+    /// List the org's hosts (device `dt_` bearer). `lastSeenAt` arrives as an ISO-8601
+    /// string with fractional seconds (JS `toISOString`) or null; an unparseable or null
+    /// timestamp degrades to `nil` — the fail-safe reading (the host shows offline).
+    public func listHosts(deviceToken: String) async throws -> [HostSummary] {
+        let (data, status) = try await perform(method: "GET", path: "/v1/hosts", token: deviceToken, body: nil)
+        let json = try object(data, status)
+        guard let rows = json["hosts"] as? [[String: Any]] else {
+            throw APIError(status: status, code: "invalid-response")
+        }
+        return try rows.map { row in
+            guard
+                let id = row["id"] as? String,
+                let name = row["name"] as? String
+            else { throw APIError(status: status, code: "invalid-response") }
+            let lastSeenAt = (row["lastSeenAt"] as? String).flatMap(Self.parseISODate)
+            return HostSummary(id: id, name: name, lastSeenAt: lastSeenAt)
+        }
+    }
+
+    /// Parse an ISO-8601 timestamp as the control plane emits it — JS `toISOString`'s
+    /// fractional-seconds form — falling back to the plain (non-fractional) form.
+    private static func parseISODate(_ string: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: string) { return date }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: string)
+    }
+
     // MARK: - Attention
 
     /// One pending attention event as `GET /v1/attention` returns it.

@@ -42,6 +42,9 @@ describe('board / unboard / anchor — the custody filesystem commands', () => {
     const result = await runBoard({ cwd: repo, baseDir, pathEnv: '' })
 
     expect(result.repo).toBe(repoResolved)
+    // The full agent roster — leg-P3e added the fifth (kimi), and boarding
+    // must lay a shim for every one of them.
+    expect(AGENT_IDS).toEqual(['claude', 'codex', 'gemini', 'opencode', 'kimi'])
     expect(result.shims).toHaveLength(AGENT_IDS.length)
     for (const id of AGENT_IDS) {
       const shimPath = join(shimsDir(baseDir), id)

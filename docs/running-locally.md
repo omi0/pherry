@@ -343,6 +343,47 @@ dashboard's **Pair phone** modal), pair the app:
   its steering (`device not authorized` in the daemon's local log). On the Simulator the identity
   key is a software key (no Secure Enclave) and the app labels it as such.
 
+### On a real iPhone — the https recipe
+
+On a physical device the pair gate (M24) is stricter than the Simulator loop above: the app
+refuses any non-**https** control-plane URL that isn't loopback — and to the phone, your Mac is
+never loopback. So the QR's `&api=` must carry an **https URL on your LAN**, which the dev stack
+does not speak natively. The recipe (one-time, ~5 minutes):
+
+1. **Mint a LAN certificate** with [mkcert](https://github.com/FiloSottile/mkcert):
+   `mkcert -install`, then `mkcert <LAN-IP>` (your Mac's Wi-Fi address, e.g. `192.168.1.47`).
+   Get the root CA onto the iPhone — AirDrop `$(mkcert -CAROOT)/rootCA.pem`, install the profile
+   (Settings → General → VPN & Device Management), **and** flip the full-trust toggle
+   (Settings → General → About → Certificate Trust Settings). Both steps, or every TLS dial fails
+   — the app now says so explicitly rather than blaming the pair link.
+2. **Front the control plane with TLS.** Any terminating proxy works; a dependency-free one is a
+   dozen lines of Node (save next to the mkcert output, run with `node https-proxy.mjs`):
+
+   ```js
+   // https-proxy.mjs — https://<LAN-IP>:3443 → http://127.0.0.1:3000
+   import { readFileSync } from 'node:fs'
+   import { request } from 'node:http'
+   import { createServer } from 'node:https'
+   const tls = { cert: readFileSync('./<LAN-IP>.pem'), key: readFileSync('./<LAN-IP>-key.pem') }
+   createServer(tls, (req, res) => {
+     const up = request(
+       { host: '127.0.0.1', port: 3000, path: req.url, method: req.method, headers: req.headers },
+       (r) => { res.writeHead(r.statusCode ?? 502, r.headers); r.pipe(res) },
+     )
+     req.pipe(up)
+     up.on('error', () => { res.writeHead(502); res.end() })
+   }).listen(3443)
+   ```
+
+3. **Point the stack at the LAN** in `apps/control-plane/.env`:
+   `API_PUBLIC_URL=https://<LAN-IP>:3443` (this exact string rides the QR's `&api=`) and
+   `DIRECTOR_URL=tcp://<LAN-IP>:9443` (what the phone dials for the relay — the relay itself
+   stays raw TCP; only the HTTP API needs the proxy). Restart the control plane and re-run
+   `pherry dock` so the QR carries the new URLs.
+
+Phone and Mac must share the network, and a changed LAN IP invalidates all three steps — re-mint,
+re-point, re-dock. The certificate, key, and proxy are local dev state; keep them out of the repo.
+
 Then **Hosts → the host → a session → the terminal**: the same `sessions.list` / `subscribe` /
 `input` / `resize` wire as `pherry attach`, rendered in SwiftTerm. Raise an attention event
 (`pherry attention raise …`) and it lands in the app's **Inbox** within a few seconds, exactly as

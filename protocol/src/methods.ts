@@ -2,6 +2,7 @@ import { z } from 'zod'
 import {
   ATTENTION,
   type KnownCapability,
+  LAUNCH,
   PTY_STREAM,
   SANDBOX,
   SESSION_APPROVE,
@@ -10,6 +11,7 @@ import {
 import { AttentionEvent } from './schemas/attention.js'
 import { CustodyClaim, CustodyReservation, CustodySpec, SessionList } from './schemas/custody.js'
 import { SessionRef, StreamId } from './schemas/ids.js'
+import { LaunchOptions, LaunchStartParams, LaunchStartResult } from './schemas/launch.js'
 import { MirrorStreamAck } from './schemas/mirror.js'
 import { SandboxSpec, SpawnResult } from './schemas/sandbox.js'
 import { Ack, ApprovalReply, InputFrame, SessionSubscribe, Size } from './schemas/session.js'
@@ -59,6 +61,8 @@ export const METHODS = {
   'custody.reserve': defineMethod('custody.reserve', CustodySpec, CustodyReservation),
   'custody.claim': defineMethod('custody.claim', CustodyClaim, Ack),
   'sessions.list': defineMethod('sessions.list', z.object({}), SessionList),
+  'launch.options': defineMethod('launch.options', z.object({}), LaunchOptions),
+  'launch.start': defineMethod('launch.start', LaunchStartParams, LaunchStartResult),
 } as const
 
 /** Every valid method name. */
@@ -95,6 +99,8 @@ export const METHOD_CAPABILITY = {
   'session.approve': SESSION_APPROVE,
   'sandbox.spawn': SANDBOX,
   'attention.raise': ATTENTION,
+  'launch.options': LAUNCH,
+  'launch.start': LAUNCH,
 } as const satisfies Partial<Record<MethodName, KnownCapability>>
 
 /**

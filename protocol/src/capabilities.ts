@@ -35,6 +35,9 @@ export const ATTENTION = 'attention.v1'
 /** Host can take custody of a terminal the user launched by hand ("follow"). */
 export const FOLLOW_CUSTODY = 'custody.follow.v1'
 
+/** Controller can start a known agent in a boarded project (constrained launch). */
+export const LAUNCH = 'launch.v1'
+
 /** Every capability this build knows how to name. Order is not significant. */
 export const KNOWN_CAPABILITIES = [
   PTY_STREAM,
@@ -45,6 +48,7 @@ export const KNOWN_CAPABILITIES = [
   SANDBOX,
   ATTENTION,
   FOLLOW_CUSTODY,
+  LAUNCH,
 ] as const
 
 /** Union of the capability strings this build knows. Peers may send others. */

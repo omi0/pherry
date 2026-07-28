@@ -5,7 +5,7 @@ import SwiftUI
 
 /// The three tabs of the app.
 enum RootTab: Hashable {
-    case hosts, inbox, settings
+    case sessions, inbox, settings
 }
 
 /// A request to open a specific session's terminal — set by the inbox, a push, or a ring answer.
@@ -69,7 +69,7 @@ final class AppModel {
     // MARK: Navigation intents (SwiftUI binds to these)
 
     /// The selected tab.
-    var selectedTab: RootTab = .hosts
+    var selectedTab: RootTab = .sessions
     /// A pending pair link to redeem (a scan / deep link / paste), presented as a sheet.
     var pendingPair: PairLink?
     /// An event id to scroll/deep-link to in the inbox.

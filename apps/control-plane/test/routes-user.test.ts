@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import { hosts, sessions } from '../src/db/schema.js'
 import { newSessionRowId } from '../src/ids.js'
-import { makeTestApp, seedHost, seedOrg, seedUser, seedWorld } from './support.js'
+import { makeTestApp, seedDevice, seedHost, seedOrg, seedUser, seedWorld } from './support.js'
 
 /** A fresh valid host static key as the wire carries it (standard base64, 32 bytes). */
 function freshKeyB64(): string {
@@ -263,6 +263,55 @@ describe('GET /v1/hosts', () => {
       revokedAt: null,
       lastSeenAt: null,
     })
+  })
+
+  it('lists the org hosts for a device dt_ token (the phone Sessions tab, P3e)', async () => {
+    const world = await seedWorld()
+    const res = await world.app.inject({
+      method: 'GET',
+      url: '/v1/hosts',
+      headers: { authorization: `Bearer ${world.deviceToken}` },
+    })
+    expect(res.statusCode).toBe(200)
+    const listed = res.json().hosts
+    expect(listed).toHaveLength(1)
+    expect(listed[0]).toMatchObject({ id: world.host.id, name: 'laptop', lastSeenAt: null })
+  })
+
+  it('a device from another org sees none of the caller org hosts', async () => {
+    const world = await seedWorld()
+    const otherOrg = await seedOrg(world.db, 'Other')
+    const otherUser = await seedUser(world.db, { orgId: otherOrg.id })
+    const foreign = await seedDevice(world.db, { orgId: otherOrg.id, userId: otherUser.id })
+    const res = await world.app.inject({
+      method: 'GET',
+      url: '/v1/hosts',
+      headers: { authorization: `Bearer ${foreign.token}` },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().hosts).toEqual([])
+  })
+
+  it('never carries staticPublicKey for any caller (pins stay first-party — S1)', async () => {
+    const world = await seedWorld()
+    for (const token of [world.humanToken, world.deviceToken]) {
+      const res = await world.app.inject({
+        method: 'GET',
+        url: '/v1/hosts',
+        headers: { authorization: `Bearer ${token}` },
+      })
+      expect(res.statusCode).toBe(200)
+      const listed = res.json().hosts as Record<string, unknown>[]
+      expect(listed).toHaveLength(1)
+      // The exact summary shape — and nothing else (no staticPublicKey, ever).
+      expect(Object.keys(listed[0] ?? {}).sort()).toEqual([
+        'id',
+        'keyPrefix',
+        'lastSeenAt',
+        'name',
+        'revokedAt',
+      ])
+    }
   })
 })
 

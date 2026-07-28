@@ -210,21 +210,32 @@ struct SoftwareDeviceSigner: DeviceSigner {
 }
 
 /// A minimal scripted host over a responder ``SecureChannel``: it answers `sessions.list`,
-/// `session.subscribe` (ack → snapshot → output → ended), and `session.input` / `session.resize`,
-/// and records every request for assertions.
+/// `session.subscribe` (ack → snapshot → output → ended), `session.input` / `session.resize`,
+/// and the launch pair (`launch.options` / `launch.start`, with injectable results), and
+/// records every request for assertions.
 final class ScriptedHost: @unchecked Sendable {
     private let channel: SecureChannel
     private let sessionRef: String
     private let helloAckProtocol: Int
+    private let launchOptionsResult: [String: Any]
+    private let launchStartResult: [String: Any]
     private let streamId: UInt32 = 42
     private let lock = NSLock()
     private var requests: [(method: String, params: [String: Any])] = []
     private var helloObject: [String: Any]?
 
-    init(channel: SecureChannel, sessionRef: String, helloAckProtocol: Int = PherryProtocol.version) {
+    init(
+        channel: SecureChannel,
+        sessionRef: String,
+        helloAckProtocol: Int = PherryProtocol.version,
+        launchOptionsResult: [String: Any] = [:],
+        launchStartResult: [String: Any]? = nil
+    ) {
         self.channel = channel
         self.sessionRef = sessionRef
         self.helloAckProtocol = helloAckProtocol
+        self.launchOptionsResult = launchOptionsResult
+        self.launchStartResult = launchStartResult ?? ["sessionRef": sessionRef]
         Task { await self.run() }
     }
 
@@ -293,6 +304,10 @@ final class ScriptedHost: @unchecked Sendable {
             await streamSnapshotAndEnd()
         case "session.input", "session.resize":
             await respondOk(id: id, result: ["ok": true])
+        case "launch.options":
+            await respondOk(id: id, result: launchOptionsResult)
+        case "launch.start":
+            await respondOk(id: id, result: launchStartResult)
         default:
             await respondError(id: id, code: "METHOD_NOT_FOUND", message: "unknown method")
         }

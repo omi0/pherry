@@ -36,10 +36,15 @@ export { openSession, spawnSession } from './session/spawn.js'
 export type { OpenSessionOptions } from './session/spawn.js'
 
 // Serving a connection over a secure channel
-export { serveConnection } from './serve/serve-connection.js'
+export {
+  DEFAULT_SERVED_CAPABILITIES,
+  LaunchRefusedError,
+  serveConnection,
+} from './serve/serve-connection.js'
 export type {
   CustodyHooks,
   DeviceAuthClaim,
+  LaunchHooks,
   ServeConnectionOptions,
   ServedConnection,
 } from './serve/serve-connection.js'
@@ -52,10 +57,16 @@ export type { CustodyDeskOptions, CustodyErrorCode, Reservation } from './custod
 export {
   AGENT_ADAPTERS,
   AGENT_IDS,
+  buildLaunchArgv,
   detect,
   detectArgv,
   getAdapter,
   listAgents,
   resolveLaunch,
 } from './agents/adapters.js'
-export type { AgentAdapter, AgentId, DetectOptions } from './agents/adapters.js'
+export type {
+  AgentAdapter,
+  AgentId,
+  BuildLaunchArgvOptions,
+  DetectOptions,
+} from './agents/adapters.js'

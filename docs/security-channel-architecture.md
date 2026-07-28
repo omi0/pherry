@@ -245,6 +245,18 @@ to change. Supply, and scope explicitly to:
    condition.
 4. `channel-audit.md` and this document, so known residuals are declared rather than rediscovered.
 5. The iOS conformance vectors as the cross-implementation check.
+6. **The remote surface as it now stands (P3e).** The steer-only surface the S-series gated —
+   list · subscribe · input · resize — has since grown a **constrained launch** pair,
+   `launch.options` / `launch.start` (capability `launch.v1`): the controller sends
+   *identifiers only*; the host joins them against allowlists it alone composes (its boarded
+   projects, its PATH-detected agents), builds the argv itself from the adapter table, and
+   spawns through the same custody path as a local shim launch. The free-text prompt rides as
+   one argv element straight into the PTY spawn — data, never shell — and an unknown or stale
+   id is one undifferentiated refusal. Both methods sit behind the S3 enrolled-device gate
+   (so a compromised control plane still cannot start anything), and every launch lands an
+   audit line bound to the device identity. `custody.reserve`'s caller-chosen argv/cwd/env
+   still never leaves the local unix socket (H1). Ask the auditor to review the id join and
+   the argv composition as an input-validation surface, not just the channel beneath it.
 
 Ask them specifically about: the custom single-HKDF schedule vs a Noise symmetric state; transcript
 binding sufficiency; the weak-FS-before-confirmation residual given the structural `send()` gate; and

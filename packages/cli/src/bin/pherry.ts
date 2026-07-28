@@ -148,7 +148,9 @@ async function dockCommand(args: string[]): Promise<number> {
         ? 'daemon already running'
         : result.daemon === 'started'
           ? 'daemon started'
-          : 'daemon not started (start it with `pherry serve`)'
+          : result.daemon === 'restarted'
+            ? 'daemon restarted (it dials the relay as the fresh identity)'
+            : 'daemon not started (start it with `pherry serve`)'
     process.stdout.write(`pherry: ${daemon}\n`)
     if (result.daemonNeedsRestart) {
       process.stdout.write(

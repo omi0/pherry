@@ -36,12 +36,24 @@ describe('audit-log', () => {
       { kind: 'connection-accepted', deviceKeyId: '8f2a91c34d7e0b55', transport: 'relay' },
       baseDir,
     )
+    // The constrained-launch kind (leg-P3e) rides the same shape: identity,
+    // transport, and the composed `<agent>[:<model>] in <project>` detail.
+    await appendAudit(
+      {
+        kind: 'launch',
+        deviceKeyId: '8f2a91c34d7e0b55',
+        transport: 'relay',
+        detail: 'claude:opus in pherry',
+      },
+      baseDir,
+    )
     expect((await stat(baseDir)).mode & 0o777).toBe(0o700)
     expect((await stat(auditLogPath(baseDir))).mode & 0o777).toBe(0o600)
 
     const events = await readAudit(baseDir)
-    expect(events.map((e) => e.kind)).toEqual(['connection-local', 'connection-accepted'])
+    expect(events.map((e) => e.kind)).toEqual(['connection-local', 'connection-accepted', 'launch'])
     expect(events[1]?.deviceKeyId).toBe('8f2a91c34d7e0b55')
+    expect(events[2]?.detail).toBe('claude:opus in pherry')
     expect(events.every((e) => typeof e.at === 'string' && e.at.length > 0)).toBe(true)
   })
 

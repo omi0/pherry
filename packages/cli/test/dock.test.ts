@@ -370,7 +370,20 @@ describe('runDock — guided onboarding against a control plane', () => {
     expect(second.daemonNeedsRestart).toBe(false)
   })
 
-  it('re-registers when the stored credential is stale (heartbeat 401)', async () => {
+  /** A `stopDaemon` fake: records the call and releases the pid-file lock. */
+  function fakeStop(): { stopDaemon: () => Promise<boolean>; stopped: () => boolean } {
+    let did = false
+    return {
+      stopDaemon: async () => {
+        did = true
+        await rm(hostPidPath(baseDir), { force: true })
+        return true
+      },
+      stopped: () => did,
+    }
+  }
+
+  it('re-registers when the stored credential is stale (heartbeat 401) and restarts the idle daemon', async () => {
     const first = await runDock({
       baseDir,
       apiUrl: cp.url,
@@ -379,11 +392,15 @@ describe('runDock — guided onboarding against a control plane', () => {
     })
 
     cp.opts.heartbeatStatus = 401
+    const daemon = fakeSpawn()
+    const stop = fakeStop()
     const second = await runDock({
       baseDir,
       apiUrl: cp.url,
       token: 'ct_manual',
-      spawnDaemon: fakeSpawn().spawnDaemon,
+      spawnDaemon: daemon.spawnDaemon,
+      probeDaemonSessions: async () => 0,
+      stopDaemon: stop.stopDaemon,
     })
 
     expect(second.registered).toBe('created')
@@ -392,9 +409,89 @@ describe('runDock — guided onboarding against a control plane', () => {
     // dock.json was rewritten to the fresh identity.
     const stored = JSON.parse(await readFile(dockConfigPath(baseDir), 'utf8'))
     expect(stored.hostId).toBe(second.hostId)
-    // A running daemon predates the fresh credential, so it must restart.
+    // The running daemon predated the fresh credential and held no sessions, so
+    // dock healed the wedge itself: stop, fresh spawn, no manual step left over.
+    expect(stop.stopped()).toBe(true)
+    expect(daemon.spawned()).toBe(true)
+    expect(second.daemon).toBe('restarted')
+    expect(second.daemonNeedsRestart).toBe(false)
+  })
+
+  it('restarts a stale daemon that cannot be probed (unreachable = serving nobody)', async () => {
+    await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: fakeSpawn().spawnDaemon,
+    })
+
+    cp.opts.heartbeatStatus = 401
+    const stop = fakeStop()
+    const second = await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: fakeSpawn().spawnDaemon,
+      probeDaemonSessions: async () => null,
+      stopDaemon: stop.stopDaemon,
+    })
+
+    expect(stop.stopped()).toBe(true)
+    expect(second.daemon).toBe('restarted')
+    expect(second.daemonNeedsRestart).toBe(false)
+  })
+
+  it('never kills a stale daemon holding live sessions — it warns and leaves it running', async () => {
+    await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: fakeSpawn().spawnDaemon,
+    })
+
+    cp.opts.heartbeatStatus = 401
+    const stop = fakeStop()
+    const steps: string[] = []
+    const second = await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: fakeSpawn().spawnDaemon,
+      probeDaemonSessions: async () => 2,
+      stopDaemon: stop.stopDaemon,
+      onStep: (line) => steps.push(line),
+    })
+
+    // The sessions are the human's; dock refuses the implicit kill.
+    expect(stop.stopped()).toBe(false)
     expect(second.daemon).toBe('already-running')
     expect(second.daemonNeedsRestart).toBe(true)
+    expect(steps.join('\n')).toContain('holds 2 live session(s)')
+  })
+
+  it('reports the wedge when the stale daemon does not stop cleanly', async () => {
+    await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: fakeSpawn().spawnDaemon,
+    })
+
+    cp.opts.heartbeatStatus = 401
+    const steps: string[] = []
+    const second = await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: fakeSpawn().spawnDaemon,
+      probeDaemonSessions: async () => 0,
+      stopDaemon: async () => false,
+      onStep: (line) => steps.push(line),
+    })
+
+    expect(second.daemon).toBe('already-running')
+    expect(second.daemonNeedsRestart).toBe(true)
+    expect(steps.join('\n')).toContain('did not restart cleanly')
   })
 
   it('uses a provided token with no browser and no loopback listener', async () => {

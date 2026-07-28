@@ -71,7 +71,7 @@ flowchart LR
 |---|---|
 | **Agent TUI** | The coding agent itself, launched by typing its name. |
 | **PATH shim** (`pherry board`) | Intercepts the launch, hands it to the daemon → the session is born under custody. |
-| **Host daemon** (`pherry serve`) | The heart. Owns every PTY (invariant: viewers are equal subscribers). Runs the Mirror, enforces device enrollment (keyring of enrolled phone keys), writes the local audit log, holds the host static key. Remote surface is **steer-only**: list · subscribe · input · resize — custody actions never leave the unix socket. |
+| **Host daemon** (`pherry serve`) | The heart. Owns every PTY (invariant: viewers are equal subscribers). Runs the Mirror, enforces device enrollment (keyring of enrolled phone keys), writes the local audit log, holds the host static key. Remote surface is **steer-only plus constrained launch**: list · subscribe · input · resize · launch.options · launch.start (P3e — ids joined against host-composed allowlists; the host builds the argv itself) — arbitrary custody (`custody.reserve`'s caller argv/cwd/env) never leaves the unix socket. |
 | **Local terminal viewer** | The user's own terminal — subscriber #1, no privilege over the phone. |
 | **CLI** | Onboarding + admin: `dock` (registration + pairing ceremony), `devices` (enrollment, revoke, audit tail), `attention`. |
 

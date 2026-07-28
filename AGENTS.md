@@ -83,10 +83,10 @@ does not honor nested `.gitignore`s), and the JS verify gate is untouched by it.
 
 ## Status (as of the last commit)
 
-**Done, green, pushed** — 10 workspace projects, 1017 tests: `protocol` (110) · `host` (90) · `channel`
-(80, audited) · `relay-core` (60) · `sdk` (15) · `transport-node` (11) · `cli` (206) · `control-plane`
-(355) · `relay` (31) · `dashboard` (59); plus, outside the workspace, `ios/` — `PherryKit` (50 Swift
-tests, conformance-vector-proven against the TS wire) and the app's unit bundle (62). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
+**Done, green** — 10 workspace projects, 1080 tests: `protocol` (140) · `host` (106) · `channel`
+(80, audited) · `relay-core` (60) · `sdk` (15) · `transport-node` (11) · `cli` (220) · `control-plane`
+(358) · `relay` (31) · `dashboard` (59); plus, outside the workspace, `ios/` — `PherryKit` (59 Swift
+tests, conformance-vector-proven against the TS wire) and the app's unit bundle (94). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
 repo, then typing `gemini` (or `claude`/`codex`/…) is intercepted by a PATH shim → the persistent
 `pherry serve` daemon takes custody → the agent's TUI opens in your terminal while a second viewer
 (`pherry attach`) mirrors the same host-owned session.
@@ -162,6 +162,21 @@ to the P3a logging stubs; no test ever hits APNs (`FakePushSender`). Real-device
 credentials + a physical iPhone (see `ios/README.md` + `docs/deploying.md` APNs). **Proven live**
 (2026-07-22, iPhone 13 / iOS 18.7, APNs sandbox): QR pair → both tokens registered → raise
 `--urgency call` → full-screen CallKit ring → answer opened the session and one-time-acked the event.
+
+**Leg P3e is done — sessions-first phone UX + constrained remote launch** (spec:
+[`docs/leg-P3e.md`](./docs/leg-P3e.md)). The app's first tab is **Sessions**: one aggregated list
+across every paired host (pill filters `All · <host> · +`, host online/offline from a now
+device-readable `GET /v1/hosts`, 90 s liveness window), and a floating `+` opens **New session** —
+host → project → agent + model → prompt → Start agent. The wire grew two additive methods
+(`launch.options` / `launch.start`, capability `launch.v1`, no version bump): the phone sends
+**ids only**; the host joins them against allowlists it alone composes (`~/.pherry/boarded.list` ×
+PATH-detected `AGENT_ADAPTERS`, now five with `kimi`), builds the argv itself
+(`buildLaunchArgv` — model flag + prompt per the adapter's `promptArg` template: positional,
+interactive flag, or refused for a CLI with none, advertised as `promptSupported: false`), and spawns through the same
+`CustodyDesk` path as a shim launch. H1 stands: `custody.*` (caller argv/cwd/env) never leaves the
+unix socket; launch rides the S3 enrolled-device gate, refuses unknown ids undifferentiated
+(`LaunchRefusedError`), and lands a `launch` audit line with the device identity. Exit proof:
+`packages/cli/test/serve-relay.test.ts`.
 
 **Next: P3d** voice worker (LiveKit room behind the ring channel) · **P4** cloud sandboxes.
 Continuing an in-flight phase? Read [`docs/HANDOFF.md`](./docs/HANDOFF.md) — state, seams, and the

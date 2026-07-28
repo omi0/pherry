@@ -1,9 +1,11 @@
 /**
- * The **user API** — routes authenticated by a human bearer token (§4a). A missing
- * or invalid token → `401`; a host/device belonging to another org → `404` (it is
- * invisible, not forbidden). Everything a person does from the dashboard or `dock`
- * lives here: registering hosts, minting pair tokens, listing/revoking devices,
- * reading session metadata, and reading the enrollment/authorization log (S4).
+ * The **user API** — routes authenticated by a human bearer token (§4a), with one
+ * deliberate exception: `GET /v1/hosts` also accepts a device `dt_` bearer (P3e —
+ * see its route comment). A missing or invalid token → `401`; a host/device
+ * belonging to another org → `404` (it is invisible, not forbidden). Everything a
+ * person does from the dashboard or `dock` lives here: registering hosts, minting
+ * pair tokens, listing/revoking devices, reading session metadata, and reading the
+ * enrollment/authorization log (S4).
  */
 import { decodeKey } from '@pherry/channel'
 import { newHostId } from '@pherry/protocol'
@@ -14,7 +16,14 @@ import { devices, hosts, sessions } from '../db/schema.js'
 import { appendAuditEvent, listAuditEvents } from '../services/audit.js'
 import { mintSecret } from '../services/auth.js'
 import { mintPairToken } from '../services/pairing.js'
-import { OkResponse, isoOrNull, parseBody, requireHuman, sendError } from './http.js'
+import {
+  OkResponse,
+  isoOrNull,
+  parseBody,
+  requireDeviceOrHuman,
+  requireHuman,
+  sendError,
+} from './http.js'
 
 /**
  * `GET /v1/me` response — the dashboard's session probe: who the bearer is and the
@@ -183,11 +192,16 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     })
   })
 
-  // GET /v1/hosts — list the caller's org's hosts.
+  // GET /v1/hosts — list the caller's org's hosts. The one device-readable route in
+  // this router (P3e): the phone's Sessions tab needs host names + liveness to build
+  // its aggregated session list, so a dt_ token is accepted alongside a human bearer,
+  // with the caller's org as the tenancy boundary (M11). The summary never carries
+  // staticPublicKey — pins are first-party (S1); the control plane never supplies
+  // keys to controllers on this path.
   app.get('/v1/hosts', async (request, reply) => {
-    const principal = await requireHuman(request, reply)
+    const principal = await requireDeviceOrHuman(request, reply)
     if (principal === null) return
-    const rows = await app.db.select().from(hosts).where(eq(hosts.orgId, principal.org.id))
+    const rows = await app.db.select().from(hosts).where(eq(hosts.orgId, principal.orgId))
     return ListHostsResponse.parse({
       hosts: rows.map((h) => ({
         id: h.id,

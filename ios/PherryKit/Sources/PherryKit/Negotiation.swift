@@ -20,9 +20,13 @@ enum PherryProtocol {
     static let minCompatibleVersion = 2
 
     /// The mirror-and-steer capabilities this controller advertises by default: it streams
-    /// the PTY mirror (`pty.stream.v1`) with an initial snapshot (`mirror.snapshot.v1`) and
-    /// sends input / resize (`session.input.v1`).
-    static let controllerCapabilities = ["pty.stream.v1", "mirror.snapshot.v1", "session.input.v1"]
+    /// the PTY mirror (`pty.stream.v1`) with an initial snapshot (`mirror.snapshot.v1`),
+    /// sends input / resize (`session.input.v1`), and starts constrained launches
+    /// (`launch.v1`, leg-P3e — the host only serves negotiated capabilities, so without
+    /// this the launch methods would answer `FORBIDDEN`).
+    static let controllerCapabilities = [
+        "pty.stream.v1", "mirror.snapshot.v1", "session.input.v1", "launch.v1",
+    ]
 
     /// Outcome of a one-directional compatibility check.
     enum Compat: Equatable {

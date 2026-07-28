@@ -143,6 +143,62 @@ final class ControlPlaneClientTests: XCTestCase {
         XCTAssertEqual(URLProtocolStub.lastRequest?.url?.path, "/v1/device/push-tokens")
     }
 
+    /// P3e: `GET /v1/hosts` — the `{ hosts: [...] }` envelope, the `dt_` bearer, a JS
+    /// `toISOString` fractional timestamp parsed to the exact instant, and a null
+    /// `lastSeenAt` decoding to `nil`. Extra fields (`keyPrefix`, `revokedAt`) are ignored.
+    func testListHostsParsesDatesAndSendsBearer() async throws {
+        URLProtocolStub.respond(status: 200, json: [
+            "hosts": [
+                [
+                    "id": "host_1", "name": "laptop", "keyPrefix": "hk_abcd1234",
+                    "lastSeenAt": "2023-11-14T22:13:20.500Z", "revokedAt": NSNull(),
+                ],
+                [
+                    "id": "host_2", "name": "studio", "keyPrefix": "hk_ffff0000",
+                    "lastSeenAt": NSNull(), "revokedAt": NSNull(),
+                ],
+            ],
+        ])
+        let hosts = try await makeClient().listHosts(deviceToken: secretToken)
+        XCTAssertEqual(hosts.count, 2)
+        XCTAssertEqual(hosts[0].id, "host_1")
+        XCTAssertEqual(hosts[0].name, "laptop")
+        let seen = try XCTUnwrap(hosts[0].lastSeenAt)
+        XCTAssertEqual(seen.timeIntervalSince1970, 1_700_000_000.5, accuracy: 0.001)
+        XCTAssertEqual(hosts[1], ControlPlaneClient.HostSummary(id: "host_2", name: "studio", lastSeenAt: nil))
+
+        XCTAssertEqual(URLProtocolStub.lastRequest?.url?.path, "/v1/hosts")
+        XCTAssertEqual(URLProtocolStub.lastRequest?.httpMethod, "GET")
+        XCTAssertEqual(URLProtocolStub.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer \(secretToken)")
+    }
+
+    /// A non-fractional ISO-8601 timestamp still parses (the documented fallback), and a
+    /// row missing `lastSeenAt` entirely decodes to `nil` — both fail-safe toward offline.
+    func testListHostsParsesNonFractionalDateAndMissingKey() async throws {
+        URLProtocolStub.respond(status: 200, json: [
+            "hosts": [
+                ["id": "host_1", "name": "mbp", "lastSeenAt": "2023-11-14T22:13:20Z"],
+                ["id": "host_2", "name": "studio"],
+            ],
+        ])
+        let hosts = try await makeClient().listHosts(deviceToken: secretToken)
+        let seen = try XCTUnwrap(hosts[0].lastSeenAt)
+        XCTAssertEqual(seen.timeIntervalSince1970, 1_700_000_000, accuracy: 0.001)
+        XCTAssertNil(hosts[1].lastSeenAt)
+    }
+
+    /// A response without the `{ hosts }` envelope (or a row missing `id`/`name`) is the
+    /// client's uniform `invalid-response` ``APIError`` — matching every other decoder here.
+    func testListHostsMalformedEnvelopeThrows() async throws {
+        URLProtocolStub.respond(status: 200, json: ["items": []])
+        do {
+            _ = try await makeClient().listHosts(deviceToken: secretToken)
+            XCTFail("expected an APIError")
+        } catch let error as APIError {
+            XCTAssertEqual(error.code, "invalid-response")
+        }
+    }
+
     func testErrorEnvelopeBecomesAPIError() async throws {
         URLProtocolStub.respond(status: 404, json: ["error": ["code": "host-not-found", "message": "no such host"]])
         do {

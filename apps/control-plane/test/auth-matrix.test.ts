@@ -21,7 +21,8 @@ interface Route {
 
 const ROUTES: readonly Route[] = [
   { name: 'POST /v1/hosts', method: 'POST', url: () => '/v1/hosts', accepts: 'human' },
-  { name: 'GET /v1/hosts', method: 'GET', url: () => '/v1/hosts', accepts: 'human' },
+  // device-or-human (P3e): the phone lists its org's hosts for the Sessions tab.
+  { name: 'GET /v1/hosts', method: 'GET', url: () => '/v1/hosts', accepts: 'relay' },
   {
     name: 'POST /v1/hosts/:id/pair',
     method: 'POST',

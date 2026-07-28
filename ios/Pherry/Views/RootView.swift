@@ -1,7 +1,7 @@
 import PherryKit
 import SwiftUI
 
-/// The shell: three tabs (Hosts, Inbox, Settings), the pair sheet, and the terminal cover.
+/// The shell: three tabs (Sessions, Inbox, Settings), the pair sheet, and the terminal cover.
 ///
 /// WHY it owns the lifecycle: the attention long-poll should run only while the app is foreground
 /// (quiet in the background, where push takes over), so this ties `AttentionStore`'s poll `Task` to
@@ -16,9 +16,9 @@ struct RootView: View {
         @Bindable var model = model
 
         TabView(selection: $model.selectedTab) {
-            HostsView()
-                .tabItem { Label("Hosts", systemImage: "ferry") }
-                .tag(RootTab.hosts)
+            SessionsView()
+                .tabItem { Label("Sessions", systemImage: "rectangle.stack") }
+                .tag(RootTab.sessions)
 
             InboxView()
                 .tabItem { Label("Inbox", systemImage: "tray") }

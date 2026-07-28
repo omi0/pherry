@@ -50,7 +50,12 @@ Stand up the cloud half with **`make up`** from the repo root (control plane :30
 dashboard :5173 — see [`../docs/running-locally.md`](../docs/running-locally.md) §5 and the new
 §7). Then dock a host (`pherry dock`, or the dashboard's **Pair phone** modal) and pair the app:
 
-- **On a device** — scan the QR.
+- **On a device** — scan the QR. One catch against a *local* stack: the pair gate (M24) requires
+  **https** for any control plane that isn't loopback — and to the phone, your Mac is never
+  loopback. Front the control plane with a TLS proxy on your LAN IP (mkcert + a dozen lines of
+  Node), point `API_PUBLIC_URL` / `DIRECTOR_URL` at the LAN, and re-dock for a fresh QR — the full
+  recipe is in [`../docs/running-locally.md`](../docs/running-locally.md) §7,
+  *On a real iPhone — the https recipe*.
 - **On the Simulator** — there is no camera, so copy the `pherry://pair?…` link from `pherry dock`'s
   output (or the dashboard modal) and paste it into the app's **Paste a link instead** field. If the
   link has no `&api=`, the app asks for the control-plane URL once.
@@ -77,7 +82,7 @@ push/ring channels degrade to logging stubs; the in-app inbox is unaffected.
 ## PherryKit tests & the conformance vectors
 
 ```bash
-cd ios/PherryKit && swift test          # runs on this machine, no device — 39 tests
+cd ios/PherryKit && swift test          # runs on this machine, no device — 50 tests
 ```
 
 The Swift wire is proven byte-for-byte equivalent to the TypeScript reference by the committed JSON

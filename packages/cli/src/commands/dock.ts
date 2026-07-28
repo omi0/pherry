@@ -28,6 +28,7 @@ import { encodeKey } from '@pherry/channel'
 import { deviceFingerprint, deviceKeyIdOf } from '@pherry/protocol'
 import { appendAudit } from '../audit-log.js'
 import { ControlPlaneClient, ControlPlaneError, resolveApiUrl } from '../control-plane-client.js'
+import { connectDaemon } from '../daemon/client.js'
 import { livePid } from '../daemon/pidfile.js'
 import { loadOrCreateDeviceKey } from '../device-key.js'
 import { writeAuthorizedDevice } from '../device-keyring.js'
@@ -37,6 +38,7 @@ import { knownHostEntry, writeKnownHost } from '../known-hosts.js'
 import { configPath } from '../paths.js'
 import { type PromptIo, confirm, isInteractive, processPromptIo } from '../prompt.js'
 import { renderQrTerminal } from '../qr.js'
+import { stopServe } from './serve.js'
 
 /** Options for {@link runDock}. */
 export interface DockOptions {
@@ -52,6 +54,16 @@ export interface DockOptions {
   autoStart?: boolean
   /** The daemon starter (tests). Defaults to a detached `pherry serve`. */
   spawnDaemon?: () => void
+  /**
+   * Probe the running daemon's live-session count over the local socket, `null`
+   * when it cannot be reached (tests). Defaults to a bounded `sessions.list`.
+   */
+  probeDaemonSessions?: () => Promise<number | null>
+  /**
+   * Stop the running daemon, resolving `true` once none is left (tests).
+   * Defaults to {@link stopServe}'s SIGTERM + poll.
+   */
+  stopDaemon?: () => Promise<boolean>
   /**
    * Open `url` in the user's browser, returning whether it launched. Defaults to a
    * detached platform opener (`open` on darwin, `xdg-open` otherwise). A `false`
@@ -69,7 +81,7 @@ export interface DockOptions {
 }
 
 /** The daemon's state after {@link runDock}. */
-export type DockDaemonState = 'already-running' | 'started' | 'not-started'
+export type DockDaemonState = 'already-running' | 'started' | 'restarted' | 'not-started'
 
 /** The outcome of {@link runDock}. */
 export interface DockResult {
@@ -89,7 +101,12 @@ export interface DockResult {
   dockConfigPath: string
   /** What happened to the daemon. */
   daemon: DockDaemonState
-  /** True when a running daemon predates freshly (re)written credentials it hasn't loaded. */
+  /**
+   * True when a running daemon predates freshly (re)written credentials it hasn't
+   * loaded **and** dock could not safely restart it — it holds live sessions, or
+   * the stop/start did not complete. The idle-daemon case heals automatically
+   * (`daemon` reports `'restarted'`).
+   */
   daemonNeedsRestart: boolean
   /** The phone-pairing mint, including the QR pre-rendered as terminal text. */
   pair: { pairToken: string; expiresAt: number; qrUrl: string; qrText: string }
@@ -173,14 +190,28 @@ export async function runDock(options: DockOptions = {}): Promise<DockResult> {
     baseDir,
   )
 
-  // 4. Daemon — reuse leg-3c's ensure logic verbatim.
-  const daemon = await ensureDaemon(options)
-  const daemonNeedsRestart = daemon === 'already-running' && registration.registered === 'created'
+  // 4. Daemon — leg-3c's ensure logic, then the re-dock healing: a daemon that
+  // predates a fresh registration keeps serving the OLD identity (see
+  // restartStaleDaemon), so an idle one is restarted here, not warned about.
+  let daemon = await ensureDaemon(options)
+  let daemonNeedsRestart = daemon === 'already-running' && registration.registered === 'created'
+  let staleSessions: number | null = null
+  if (daemonNeedsRestart && options.autoStart !== false) {
+    const healed = await restartStaleDaemon(options)
+    if (healed.restarted) {
+      daemon = 'restarted'
+      daemonNeedsRestart = false
+    } else {
+      staleSessions = healed.liveSessions
+    }
+  }
   step(`pherry: (4/5) ${describeDaemon(daemon)}`)
   if (daemonNeedsRestart) {
     step(
-      'pherry: the running daemon predates this dock — restart it to dial the relay: ' +
-        '`pherry serve --stop` then `pherry serve`',
+      staleSessions !== null && staleSessions > 0
+        ? `pherry: the running daemon predates this dock and holds ${staleSessions} live session(s) — ending them is your call: \`pherry serve --stop\` then \`pherry serve\` dials the relay as the new identity`
+        : 'pherry: the running daemon predates this dock and did not restart cleanly — ' +
+            'restart it to dial the relay: `pherry serve --stop` then `pherry serve`',
     )
   }
 
@@ -498,6 +529,75 @@ async function isCredentialValid(
   }
 }
 
+/** The outcome of {@link restartStaleDaemon}. */
+interface StaleDaemonRestart {
+  /** Whether the stale daemon was stopped and a fresh one came up. */
+  restarted: boolean
+  /** The stale daemon's live-session count, `null` when it could not be probed. */
+  liveSessions: number | null
+}
+
+/**
+ * Heal the re-dock wedge (found by the 2026-07 device pass): a daemon started
+ * before this dock re-registered keeps serving the OLD identity — its heartbeats
+ * even keep the stale host row looking alive — while its relay uplink answers for
+ * a hostId no current QR or ticket points at, so phone connects fail silently.
+ * Restarting it makes it reload `dock.json` (and the rotated key, if any) and
+ * dial the relay as the identity this dock just registered.
+ *
+ * One guard: a daemon holding **live sessions** is never killed implicitly —
+ * restarting disposes every PTY — so the daemon's `sessions.list` is probed over
+ * the local socket first and a busy daemon is left to the human. An unreachable
+ * or hung daemon (a `null` probe) is serving nobody and is restarted; a rotated
+ * host key also fails the probe to `null`, which is still correct — sessions
+ * behind a rotated key are unreachable by every controller anyway.
+ */
+async function restartStaleDaemon(options: DockOptions): Promise<StaleDaemonRestart> {
+  const probe = options.probeDaemonSessions ?? defaultProbeDaemonSessions(options.baseDir)
+  const liveSessions = await probe()
+  if (liveSessions !== null && liveSessions > 0) return { restarted: false, liveSessions }
+
+  const stop = options.stopDaemon ?? defaultStopDaemon(options.baseDir)
+  if (!(await stop())) return { restarted: false, liveSessions }
+
+  // The lock is free now, so the ensure logic starts a fresh daemon — one that
+  // reads the dock.json this run just wrote.
+  const state = await ensureDaemon(options)
+  return { restarted: state === 'started', liveSessions }
+}
+
+/** How long, in ms, the live-session probe of a running daemon may take. */
+const PROBE_TIMEOUT_MS = 2_000
+
+/**
+ * Build the default live-session probe: dial the daemon's local socket and ask
+ * `sessions.list`, bounded by {@link PROBE_TIMEOUT_MS}. Resolves `null` — never
+ * rejects — when the daemon cannot be reached, refuses the handshake (a rotated
+ * host key), or does not answer in time.
+ */
+function defaultProbeDaemonSessions(baseDir?: string): () => Promise<number | null> {
+  return () => {
+    const probe = (async (): Promise<number | null> => {
+      const controller = await connectDaemon(baseDir)
+      try {
+        const { sessions } = await controller.request('sessions.list', {})
+        return sessions.length
+      } finally {
+        controller.close()
+      }
+    })().catch(() => null)
+    return Promise.race([probe, delay(PROBE_TIMEOUT_MS).then(() => null)])
+  }
+}
+
+/** Build the default daemon stopper: {@link stopServe}, `true` once none is left. */
+function defaultStopDaemon(baseDir?: string): () => Promise<boolean> {
+  return async () => {
+    const result = await stopServe(baseDir !== undefined ? { baseDir } : {})
+    return !result.running || result.stopped === true
+  }
+}
+
 /** Start the daemon if needed and allowed, reporting the resulting state. */
 async function ensureDaemon(options: DockOptions): Promise<DockDaemonState> {
   if ((await livePid(options.baseDir)) !== null) return 'already-running'
@@ -521,6 +621,8 @@ function describeDaemon(state: DockDaemonState): string {
       return 'daemon already running'
     case 'started':
       return 'daemon started'
+    case 'restarted':
+      return 'daemon restarted — it now dials the relay as the identity this dock registered'
     case 'not-started':
       return 'daemon not started — start it with `pherry serve`'
   }
