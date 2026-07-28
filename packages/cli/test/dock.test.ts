@@ -4,12 +4,16 @@ import { type IncomingMessage, type ServerResponse, createServer } from 'node:ht
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { runDock } from '../src/commands/dock.js'
 import { loadOrCreateDeviceKey } from '../src/device-key.js'
 import { readAuthorizedDevices } from '../src/device-keyring.js'
 import { dockConfigPath } from '../src/dock-config.js'
 import { hostPidPath, publicKeyPath } from '../src/index.js'
+import type { PromptIo } from '../src/prompt.js'
+import type { ServiceBackend } from '../src/service/backend.js'
+import { readServicePreference } from '../src/service/preference.js'
 
 /**
  * A small in-memory control plane implementing exactly the endpoints `dock` drives:
@@ -467,6 +471,231 @@ describe('runDock — guided onboarding against a control plane', () => {
     expect(second.daemon).toBe('already-running')
     expect(second.daemonNeedsRestart).toBe(true)
     expect(steps.join('\n')).toContain('holds 2 live session(s)')
+  })
+
+  // ---- Boot persistence (P3f) ----
+
+  /** The unit facts a test bakes — never resolved live under vitest. */
+  const SERVICE_INV = { nodeBin: '/n', script: '/s', pathEnv: '/p', logPath: '/l' }
+
+  /**
+   * A scripted service backend recording every call; `start()` fakes the
+   * supervised daemon coming up by writing the pid file (the managed twin of
+   * `fakeSpawn`).
+   */
+  function fakeService(opts: { failInstall?: boolean } = {}): {
+    backend: ServiceBackend
+    calls: string[]
+  } {
+    const calls: string[] = []
+    const backend: ServiceBackend = {
+      kind: 'launchd',
+      unitPath: '/fake/com.pherry.serve.plist',
+      async install() {
+        calls.push('install')
+        if (opts.failInstall) throw new Error('Bootstrap failed: 5')
+        return ['pherry: note — linger advice']
+      },
+      async uninstall() {
+        calls.push('uninstall')
+      },
+      async start() {
+        calls.push('start')
+        writeFileSync(hostPidPath(baseDir), `${process.pid}\n`)
+      },
+      async restart() {
+        calls.push('restart')
+      },
+      async status() {
+        return { state: 'stopped', pid: null, unitPath: '/fake/com.pherry.serve.plist' }
+      },
+    }
+    return { backend, calls }
+  }
+
+  /** Interactive prompt streams pre-loaded with `answer`; non-TTY when `answer` is null. */
+  function promptIo(answer: string | null): PromptIo {
+    const input = new PassThrough() as PassThrough & { isTTY?: boolean }
+    input.isTTY = answer !== null
+    if (answer !== null) input.end(`${answer}\n`)
+    return { input, output: new PassThrough() }
+  }
+
+  it('service (P3f): a non-interactive dock with no decision on file asks nothing, changes nothing', async () => {
+    const svc = fakeService()
+    const result = await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: fakeSpawn().spawnDaemon,
+      serviceBackend: svc.backend,
+      serviceInvocation: SERVICE_INV,
+      promptIo: promptIo(null),
+    })
+    expect(result.service).toBe('not-asked')
+    expect(svc.calls).toEqual([])
+    expect(await readServicePreference(baseDir)).toBeNull()
+  })
+
+  it('service (P3f): a consented install is remembered, narrated, and starts the daemon SUPERVISED', async () => {
+    const svc = fakeService()
+    const spawn = fakeSpawn()
+    const steps: string[] = []
+    const result = await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: spawn.spawnDaemon,
+      serviceBackend: svc.backend,
+      serviceInvocation: SERVICE_INV,
+      promptIo: promptIo('y'),
+      onStep: (line) => steps.push(line),
+    })
+
+    expect(result.service).toBe('installed')
+    expect(await readServicePreference(baseDir)).toBe('installed')
+    // The daemon came up through the manager, not the detached spawn.
+    expect(svc.calls).toEqual(['install', 'start'])
+    expect(spawn.spawned()).toBe(false)
+    expect(result.daemon).toBe('started')
+    expect(steps.join('\n')).toContain('boot service installed')
+    expect(steps.join('\n')).toContain('linger advice')
+  })
+
+  it('service (P3f): a decline is remembered — the next dock does not ask again', async () => {
+    const svc = fakeService()
+    const first = await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: fakeSpawn().spawnDaemon,
+      serviceBackend: svc.backend,
+      serviceInvocation: SERVICE_INV,
+      promptIo: promptIo('n'),
+    })
+    expect(first.service).toBe('declined')
+    expect(await readServicePreference(baseDir)).toBe('declined')
+
+    // Re-dock: interactive streams again, but the remembered 'declined' wins —
+    // an unanswered prompt would hang, so completing proves nothing was asked.
+    const second = await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: fakeSpawn().spawnDaemon,
+      serviceBackend: svc.backend,
+      serviceInvocation: SERVICE_INV,
+      promptIo: promptIo(null),
+    })
+    expect(second.service).toBe('declined')
+    expect(svc.calls).toEqual([])
+  })
+
+  it('service (P3f): a remembered install refreshes the unit silently on every re-dock', async () => {
+    const svc = fakeService()
+    await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: fakeSpawn().spawnDaemon,
+      service: true,
+      serviceBackend: svc.backend,
+      serviceInvocation: SERVICE_INV,
+      promptIo: promptIo(null),
+    })
+
+    const steps: string[] = []
+    const second = await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: fakeSpawn().spawnDaemon,
+      serviceBackend: svc.backend,
+      serviceInvocation: SERVICE_INV,
+      promptIo: promptIo(null),
+      onStep: (line) => steps.push(line),
+    })
+
+    expect(second.service).toBe('installed')
+    expect(svc.calls.filter((c) => c === 'install')).toHaveLength(2)
+    expect(steps.join('\n')).toContain('boot service refreshed')
+  })
+
+  it('service (P3f): --no-service declines and records without asking', async () => {
+    const svc = fakeService()
+    const result = await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: fakeSpawn().spawnDaemon,
+      service: false,
+      serviceBackend: svc.backend,
+      serviceInvocation: SERVICE_INV,
+      promptIo: promptIo(null),
+    })
+    expect(result.service).toBe('declined')
+    expect(await readServicePreference(baseDir)).toBe('declined')
+    expect(svc.calls).toEqual([])
+  })
+
+  it('service (P3f): an install failure never fails the dock — narrated, not recorded', async () => {
+    const svc = fakeService({ failInstall: true })
+    const spawn = fakeSpawn()
+    const steps: string[] = []
+    const result = await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: spawn.spawnDaemon,
+      service: true,
+      serviceBackend: svc.backend,
+      serviceInvocation: SERVICE_INV,
+      promptIo: promptIo(null),
+      onStep: (line) => steps.push(line),
+    })
+
+    expect(result.service).toBe('failed')
+    expect(result.hostId).toMatch(/^host_/)
+    // The unmanaged spawn still brought a daemon up; the failure is advice, not a wall.
+    expect(spawn.spawned()).toBe(true)
+    expect(result.daemon).toBe('started')
+    expect(await readServicePreference(baseDir)).toBeNull()
+    expect(steps.join('\n')).toContain('boot service install failed')
+  })
+
+  it('service (P3f): the stale-identity heal restarts THROUGH the manager when managed', async () => {
+    const svc = fakeService()
+    await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: fakeSpawn().spawnDaemon,
+      service: true,
+      serviceBackend: svc.backend,
+      serviceInvocation: SERVICE_INV,
+      promptIo: promptIo(null),
+    })
+
+    cp.opts.heartbeatStatus = 401
+    const stop = fakeStop()
+    const spawn = fakeSpawn()
+    const second = await runDock({
+      baseDir,
+      apiUrl: cp.url,
+      token: 'ct_manual',
+      spawnDaemon: spawn.spawnDaemon,
+      serviceBackend: svc.backend,
+      serviceInvocation: SERVICE_INV,
+      promptIo: promptIo(null),
+      probeDaemonSessions: async () => 0,
+      stopDaemon: stop.stopDaemon,
+    })
+
+    expect(second.daemon).toBe('restarted')
+    expect(stop.stopped()).toBe(true)
+    // Both the first ensure and the heal went through the manager's start.
+    expect(svc.calls.filter((c) => c === 'start')).toHaveLength(2)
+    expect(spawn.spawned()).toBe(false)
   })
 
   it('reports the wedge when the stale daemon does not stop cleanly', async () => {

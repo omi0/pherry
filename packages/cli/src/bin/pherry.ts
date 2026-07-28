@@ -30,7 +30,8 @@ import { enrollDevice, runDock } from '../commands/dock.js'
 import { runHostsForget, runHostsList, runHostsTrust } from '../commands/hosts.js'
 import { runOpen } from '../commands/open.js'
 import { startRun } from '../commands/run.js'
-import { startServe, stopServe } from '../commands/serve.js'
+import { AlreadyRunningError, startServe, stopServe } from '../commands/serve.js'
+import { type ServiceAction, runService } from '../commands/service.js'
 import { runSessions } from '../commands/sessions.js'
 import { type AttentionEventRecord, ControlPlaneError } from '../control-plane-client.js'
 import { livePid } from '../daemon/pidfile.js'
@@ -38,8 +39,11 @@ import { livePid } from '../daemon/pidfile.js'
 const USAGE = `pherry — steer your coding agents from your phone
 
 Usage:
-  pherry dock [--api <url>] [--token <tok>] [--no-wait]
+  pherry dock [--api <url>] [--token <tok>] [--no-wait] [--service | --no-service]
                                     sign in, register this host, pair + enroll your phone
+  pherry service install | uninstall | status | start | restart
+                                    the boot service: keep the daemon alive across
+                                    crashes and reboots (launchd / systemd user unit)
   pherry board [<repo>] [--no-rc]   install PATH shims so agents launch under custody
                                     (wires them into your shell rc; --no-rc skips that)
   pherry anchor [<repo>]            soft brake: stop custodying new launches here
@@ -93,6 +97,8 @@ async function main(argv: string[]): Promise<number> {
       return attentionCommand(rest)
     case 'serve':
       return serveCommand(rest)
+    case 'service':
+      return serviceCommand(rest)
     case 'run':
       return runCommand(rest)
     case 'attach':
@@ -121,8 +127,14 @@ async function dockCommand(args: string[]): Promise<number> {
       name: { type: 'string' },
       'no-daemon': { type: 'boolean' },
       'no-wait': { type: 'boolean' },
+      service: { type: 'boolean' },
+      'no-service': { type: 'boolean' },
     },
   })
+  if (values.service && values['no-service']) {
+    process.stderr.write('pherry: --service and --no-service conflict — pick one\n')
+    return 2
+  }
   // Flags win over the environment fallbacks.
   const apiUrl = values.api ?? process.env.PHERRY_API_URL
   const token = values.token ?? process.env.PHERRY_TOKEN
@@ -134,6 +146,8 @@ async function dockCommand(args: string[]): Promise<number> {
       ...(token ? { token } : {}),
       ...(values.name ? { name: values.name } : {}),
       ...(values['no-daemon'] ? { autoStart: false } : {}),
+      ...(values.service ? { service: true } : {}),
+      ...(values['no-service'] ? { service: false } : {}),
       onStep: (line) => process.stdout.write(`${line}\n`),
     })
 
@@ -152,6 +166,11 @@ async function dockCommand(args: string[]): Promise<number> {
             ? 'daemon restarted (it dials the relay as the fresh identity)'
             : 'daemon not started (start it with `pherry serve`)'
     process.stdout.write(`pherry: ${daemon}\n`)
+    if (result.service === 'not-asked') {
+      process.stdout.write(
+        'pherry: tip — `pherry service install` keeps this host dispatchable across reboots\n',
+      )
+    }
     if (result.daemonNeedsRestart) {
       process.stdout.write(
         'pherry: restart the daemon to dial the relay: `pherry serve --stop` then `pherry serve`\n',
@@ -547,6 +566,20 @@ function writeAttentionLine(event: AttentionEventRecord): void {
   if (event.options) for (const option of event.options) process.stdout.write(`    - ${option}\n`)
 }
 
+async function serviceCommand(args: string[]): Promise<number> {
+  const { positionals } = parseArgs({ args, allowPositionals: true, options: {} })
+  const action = positionals[0]
+  const actions: readonly ServiceAction[] = ['install', 'uninstall', 'status', 'start', 'restart']
+  if (action === undefined || !(actions as readonly string[]).includes(action)) {
+    process.stderr.write(`pherry: usage: pherry service <${actions.join(' | ')}>\n`)
+    return 2
+  }
+  return runService(action as ServiceAction, {
+    ...baseDirOption(),
+    out: (line) => process.stdout.write(`${line}\n`),
+  })
+}
+
 async function serveCommand(args: string[]): Promise<number> {
   const { values } = parseArgs({
     args,
@@ -561,7 +594,20 @@ async function serveCommand(args: string[]): Promise<number> {
     return 0
   }
 
-  const handle = await startServe({ ...baseDirOption() })
+  let handle: Awaited<ReturnType<typeof startServe>>
+  try {
+    handle = await startServe({ ...baseDirOption() })
+  } catch (error) {
+    // The P3f exit-code contract: a daemon already being up is SUCCESS. A
+    // restart-on-failure service manager reads this 0 and goes dormant instead
+    // of thrashing against a hand-run daemon; every other startup failure
+    // stays non-zero so the manager restarts.
+    if (error instanceof AlreadyRunningError) {
+      process.stdout.write(`pherry: daemon already running (pid ${error.pid}) — nothing to do\n`)
+      return 0
+    }
+    throw error
+  }
   process.stdout.write(`pherry: custody daemon listening on ${handle.socketPath}\n`)
   process.stdout.write('pherry: press Ctrl-C to stop\n')
   await new Promise<void>((resolve) => {

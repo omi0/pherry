@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { connectDaemon } from '../src/daemon/client.js'
 import { writeDockConfig } from '../src/dock-config.js'
 import {
+  AlreadyRunningError,
   type ServeHandle,
   hostPidPath,
   hostSocketPath,
@@ -74,6 +75,15 @@ describe('startServe — the custody daemon', () => {
   it('refuses to start a second daemon on the same base dir', async () => {
     await start()
     await expect(startServe({ baseDir, backend: rec.backend })).rejects.toThrow(/already running/)
+    // Typed, and carrying the pid — the bin maps exactly this class to exit 0
+    // (the P3f contract: a restart-on-failure service manager must read
+    // "already running" as success, or it thrashes against a hand-run daemon).
+    const error = await startServe({ baseDir, backend: rec.backend }).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(error).toBeInstanceOf(AlreadyRunningError)
+    expect((error as AlreadyRunningError).pid).toBe(process.pid)
   })
 
   it('reserve -> claim registers a custody session listed with its argv/cwd', async () => {

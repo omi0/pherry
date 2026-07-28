@@ -38,6 +38,13 @@ import { knownHostEntry, writeKnownHost } from '../known-hosts.js'
 import { configPath } from '../paths.js'
 import { type PromptIo, confirm, isInteractive, processPromptIo } from '../prompt.js'
 import { renderQrTerminal } from '../qr.js'
+import {
+  type ServeInvocation,
+  type ServiceBackend,
+  detectServiceBackend,
+  resolveServeInvocation,
+} from '../service/backend.js'
+import { readServicePreference, writeServicePreference } from '../service/preference.js'
 import { stopServe } from './serve.js'
 
 /** Options for {@link runDock}. */
@@ -78,7 +85,35 @@ export interface DockOptions {
   authTimeoutMs?: number
   /** Override the server-suggested exchange poll interval, in ms (tests). */
   pollIntervalMs?: number
+  /**
+   * Force the boot-service decision (P3f): `true` installs, `false` declines —
+   * both recorded. Absent = honor the remembered choice, else ask (interactive
+   * runs only).
+   */
+  service?: boolean
+  /**
+   * The OS service backend (tests). Defaults to platform detection; `null`
+   * models an unsupported platform.
+   */
+  serviceBackend?: ServiceBackend | null
+  /** The composed unit facts (tests). Defaults to a live {@link resolveServeInvocation}. */
+  serviceInvocation?: ServeInvocation
+  /** The consent-prompt streams (tests). Defaults to the process's. */
+  promptIo?: PromptIo
 }
+
+/** What happened to the boot service (P3f) on this dock. */
+export type DockServiceState =
+  /** The unit was installed — or refreshed, on a re-dock with a remembered 'installed'. */
+  | 'installed'
+  /** The human said no (this run or a remembered one); dock will not ask again. */
+  | 'declined'
+  /** No decision on file and no human to ask (non-interactive) — nothing changed. */
+  | 'not-asked'
+  /** No supported service manager on this platform. */
+  | 'unavailable'
+  /** Install was wanted but the service manager refused; docking continued. */
+  | 'failed'
 
 /** The daemon's state after {@link runDock}. */
 export type DockDaemonState = 'already-running' | 'started' | 'restarted' | 'not-started'
@@ -108,6 +143,8 @@ export interface DockResult {
    * (`daemon` reports `'restarted'`).
    */
   daemonNeedsRestart: boolean
+  /** What happened to the boot service (P3f). */
+  service: DockServiceState
   /** The phone-pairing mint, including the QR pre-rendered as terminal text. */
   pair: { pairToken: string; expiresAt: number; qrUrl: string; qrText: string }
 }
@@ -190,14 +227,68 @@ export async function runDock(options: DockOptions = {}): Promise<DockResult> {
     baseDir,
   )
 
+  // 3d. Boot persistence (P3f) — decide BEFORE the daemon step, so a consented
+  // install starts the daemon *supervised* instead of racing a hand-spawn. The
+  // decision ladder: an explicit flag > the remembered choice > one interactive
+  // question (fail-closed `confirm`; a non-TTY run never asks and never
+  // installs). A service-manager failure narrates and docking continues — boot
+  // persistence is never worth failing the pairing ceremony over.
+  const backend =
+    options.serviceBackend !== undefined ? options.serviceBackend : detectServiceBackend()
+  const io = options.promptIo ?? processPromptIo()
+  let service: DockServiceState = 'unavailable'
+  let managed: ServiceBackend | null = null
+  if (backend !== null) {
+    const remembered = await readServicePreference(baseDir)
+    let install: boolean | 'skip'
+    if (options.service !== undefined) install = options.service
+    else if (remembered !== null) install = remembered === 'installed'
+    else if (isInteractive(io)) {
+      install = await confirm(
+        'pherry: install the boot service, so this host stays dispatchable across reboots?',
+        io,
+      )
+    } else install = 'skip'
+
+    if (install === 'skip') {
+      service = 'not-asked'
+    } else if (!install) {
+      service = 'declined'
+      await writeServicePreference('declined', baseDir)
+    } else {
+      try {
+        const invocation = options.serviceInvocation ?? (await resolveServeInvocation({ baseDir }))
+        const advice = await backend.install(invocation)
+        await writeServicePreference('installed', baseDir)
+        service = 'installed'
+        managed = backend
+        step(
+          remembered === 'installed'
+            ? `pherry: boot service refreshed (${backend.unitPath})`
+            : `pherry: boot service installed (${backend.unitPath})`,
+        )
+        for (const line of advice) step(line)
+      } catch (error) {
+        service = 'failed'
+        step(
+          `pherry: boot service install failed (${
+            error instanceof Error ? error.message : String(error)
+          }) — docking continues; retry with \`pherry service install\``,
+        )
+      }
+    }
+  }
+
   // 4. Daemon — leg-3c's ensure logic, then the re-dock healing: a daemon that
   // predates a fresh registration keeps serving the OLD identity (see
   // restartStaleDaemon), so an idle one is restarted here, not warned about.
-  let daemon = await ensureDaemon(options)
+  // When the boot service is installed, starts go through the manager so the
+  // running daemon is the supervised one.
+  let daemon = await ensureDaemon(options, managed)
   let daemonNeedsRestart = daemon === 'already-running' && registration.registered === 'created'
   let staleSessions: number | null = null
   if (daemonNeedsRestart && options.autoStart !== false) {
-    const healed = await restartStaleDaemon(options)
+    const healed = await restartStaleDaemon(options, managed)
     if (healed.restarted) {
       daemon = 'restarted'
       daemonNeedsRestart = false
@@ -232,6 +323,7 @@ export async function runDock(options: DockOptions = {}): Promise<DockResult> {
     dockConfigPath: dockConfigPath(baseDir),
     daemon,
     daemonNeedsRestart,
+    service,
     pair: { pairToken: pair.pairToken, expiresAt: pair.expiresAt, qrUrl: pair.qrUrl, qrText },
   }
 }
@@ -552,7 +644,10 @@ interface StaleDaemonRestart {
  * host key also fails the probe to `null`, which is still correct — sessions
  * behind a rotated key are unreachable by every controller anyway.
  */
-async function restartStaleDaemon(options: DockOptions): Promise<StaleDaemonRestart> {
+async function restartStaleDaemon(
+  options: DockOptions,
+  managed: ServiceBackend | null = null,
+): Promise<StaleDaemonRestart> {
   const probe = options.probeDaemonSessions ?? defaultProbeDaemonSessions(options.baseDir)
   const liveSessions = await probe()
   if (liveSessions !== null && liveSessions > 0) return { restarted: false, liveSessions }
@@ -561,8 +656,9 @@ async function restartStaleDaemon(options: DockOptions): Promise<StaleDaemonRest
   if (!(await stop())) return { restarted: false, liveSessions }
 
   // The lock is free now, so the ensure logic starts a fresh daemon — one that
-  // reads the dock.json this run just wrote.
-  const state = await ensureDaemon(options)
+  // reads the dock.json this run just wrote (via the manager when P3f manages
+  // this host, so the healed daemon is the supervised one).
+  const state = await ensureDaemon(options, managed)
   return { restarted: state === 'started', liveSessions }
 }
 
@@ -598,13 +694,28 @@ function defaultStopDaemon(baseDir?: string): () => Promise<boolean> {
   }
 }
 
-/** Start the daemon if needed and allowed, reporting the resulting state. */
-async function ensureDaemon(options: DockOptions): Promise<DockDaemonState> {
+/**
+ * Start the daemon if needed and allowed, reporting the resulting state. When
+ * the boot service manages this host (P3f), the start goes through the manager
+ * — so the daemon that comes up is the supervised one — falling back to the
+ * detached spawn only if the manager refuses.
+ */
+async function ensureDaemon(
+  options: DockOptions,
+  managed: ServiceBackend | null = null,
+): Promise<DockDaemonState> {
   if ((await livePid(options.baseDir)) !== null) return 'already-running'
   if (options.autoStart === false) return 'not-started'
 
-  const spawnDaemon = options.spawnDaemon ?? defaultSpawnDaemon(options.baseDir)
-  spawnDaemon()
+  if (managed !== null) {
+    await managed.start().catch(() => {
+      const spawnDaemon = options.spawnDaemon ?? defaultSpawnDaemon(options.baseDir)
+      spawnDaemon()
+    })
+  } else {
+    const spawnDaemon = options.spawnDaemon ?? defaultSpawnDaemon(options.baseDir)
+    spawnDaemon()
+  }
 
   const deadline = Date.now() + START_TIMEOUT_MS
   while (Date.now() < deadline) {

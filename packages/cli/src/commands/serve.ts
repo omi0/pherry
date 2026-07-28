@@ -182,6 +182,19 @@ export interface ServeHandle {
   close(): Promise<void>
 }
 
+/**
+ * Thrown by {@link startServe} when a live daemon already holds the singleton
+ * lock. Typed so the bin can honor the P3f exit-code contract: being running
+ * is **success** (exit 0) — the thing a restart-on-failure service manager
+ * must see to defer to a hand-run daemon instead of thrashing against it.
+ */
+export class AlreadyRunningError extends Error {
+  constructor(readonly pid: number) {
+    super(`pherry serve: already running (pid ${pid})`)
+    this.name = 'AlreadyRunningError'
+  }
+}
+
 /** The outcome of {@link stopServe}. */
 export interface StopResult {
   /** Whether a live daemon was found. */
@@ -202,7 +215,7 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
   // Singleton: refuse to start atop a live daemon; reclaim a stale lock.
   const existing = await readPidFile(baseDir)
   if (existing !== null && isProcessAlive(existing)) {
-    throw new Error(`pherry serve: already running (pid ${existing})`)
+    throw new AlreadyRunningError(existing)
   }
   if (existing !== null) await removePidFile(baseDir)
 

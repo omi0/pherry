@@ -397,7 +397,43 @@ in the dashboard.
 
 ---
 
-## 8. Teardown
+## 8. Surviving reboots (the boot service — P3f)
+
+The daemon is what makes this machine dispatchable, and by default it lives only as long
+as the process `dock` spawned. To have the OS keep it alive:
+
+```bash
+pherry service install        # launchd LaunchAgent (macOS) / systemd user unit (Linux)
+pherry service status         # who's running the daemon — the service, or a hand-run serve
+pherry service uninstall      # remove it (the next dock may offer again)
+```
+
+`pherry dock` offers this once on an interactive run and remembers your answer
+(`--service` / `--no-service` to skip the question); after that, every re-dock silently
+**refreshes** the unit — re-capturing the node binary and your login-shell `PATH`, so a
+new node version or a newly installed agent CLI stays visible to the supervised daemon.
+
+The honest platform truths: on macOS the daemon starts at **login** (a user LaunchAgent,
+never root — FileVault blocks pre-login anyway); on Linux a user unit starts at first
+login unless you `loginctl enable-linger $USER`, which `install` reminds you about.
+Crashes are restarted by the manager; a deliberate `pherry serve --stop` (or Ctrl-C)
+**stays stopped** until the next login/boot or `pherry service start`. The daemon's
+output lands in `~/.pherry/serve.log` — the first place to look when the phone shows the
+host offline.
+
+**One macOS gotcha**: `~/Desktop`, `~/Documents`, and `~/Downloads` are privacy-gated (TCC)
+for background processes, and the gate covers both the **code** and the **work**. A pherry
+checkout living there (a dev Mac running from `~/Desktop`) hangs the *managed* daemon at
+startup; a normally-installed pherry (`npm i -g`, the node prefix) is ungated and boots fine
+— but a **boarded repo** in a gated folder still trips the same wall one step later: a
+phone-launched agent is a child of the managed daemon and inherits its (absent) consent, so
+it can't read its own project, while the identical launch from a hand-run `pherry serve`
+works because your terminal holds the consent. `install` warns about a gated code path and
+about a daemon that fails to appear. Fix: keep pherry and your repos outside those folders,
+or grant node Full Disk Access in System Settings → Privacy & Security (covers daemon and
+spawned agents alike).
+
+## 9. Teardown
 
 ```bash
 pherry serve --stop           # stop the docked daemon

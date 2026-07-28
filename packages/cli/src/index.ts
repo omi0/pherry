@@ -120,8 +120,42 @@ export type {
 
 // The custody daemon (leg 3c): the always-on host the shims talk to, plus the
 // `open` / `sessions` / `dock` commands built on top of it.
-export { startServe, stopServe } from './commands/serve.js'
+export { AlreadyRunningError, startServe, stopServe } from './commands/serve.js'
 export type { ServeLaunchOptions, ServeOptions, ServeHandle, StopResult } from './commands/serve.js'
+
+// P3f — boot persistence: the OS service manager keeps the daemon alive
+// (launchd LaunchAgent / systemd user unit), pherry just writes the unit.
+export {
+  defaultExec,
+  detectServiceBackend,
+  resolveServeInvocation,
+} from './service/backend.js'
+export type {
+  DetectBackendOptions,
+  Exec,
+  ExecResult,
+  ResolveInvocationOptions,
+  ServeInvocation,
+  ServiceBackend,
+  ServiceState,
+  ServiceStatus,
+} from './service/backend.js'
+export {
+  LAUNCHD_LABEL,
+  launchdBackend,
+  launchdUnitPath,
+  renderLaunchdPlist,
+} from './service/launchd.js'
+export {
+  SYSTEMD_UNIT,
+  renderSystemdUnit,
+  systemdBackend,
+  systemdUnitPath,
+} from './service/systemd.js'
+export { readServicePreference, writeServicePreference } from './service/preference.js'
+export type { ServicePreference } from './service/preference.js'
+export { runService } from './commands/service.js'
+export type { ServiceAction, ServiceCommandOptions } from './commands/service.js'
 
 // P3e — the constrained remote-launch hook builder: identifiers in, host-composed
 // argv out, spawned through the daemon's shared custody path.

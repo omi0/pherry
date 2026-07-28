@@ -83,8 +83,8 @@ does not honor nested `.gitignore`s), and the JS verify gate is untouched by it.
 
 ## Status (as of the last commit)
 
-**Done, green** — 10 workspace projects, 1080 tests: `protocol` (140) · `host` (106) · `channel`
-(80, audited) · `relay-core` (60) · `sdk` (15) · `transport-node` (11) · `cli` (220) · `control-plane`
+**Done, green** — 10 workspace projects, 1121 tests: `protocol` (140) · `host` (106) · `channel`
+(80, audited) · `relay-core` (60) · `sdk` (15) · `transport-node` (11) · `cli` (261) · `control-plane`
 (358) · `relay` (31) · `dashboard` (59); plus, outside the workspace, `ios/` — `PherryKit` (59 Swift
 tests, conformance-vector-proven against the TS wire) and the app's unit bundle (94). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
 repo, then typing `gemini` (or `claude`/`codex`/…) is intercepted by a PATH shim → the persistent
@@ -177,6 +177,19 @@ interactive flag, or refused for a CLI with none, advertised as `promptSupported
 unix socket; launch rides the S3 enrolled-device gate, refuses unknown ids undifferentiated
 (`LaunchRefusedError`), and lands a `launch` audit line with the device identity. Exit proof:
 `packages/cli/test/serve-relay.test.ts`.
+
+**Leg P3f is done — boot persistence** (spec: [`docs/leg-P3f.md`](./docs/leg-P3f.md)). The daemon
+installs as an OS-managed service — a launchd LaunchAgent on macOS, a systemd **user** unit on
+Linux, never root (the trust model is the user's own files) — via `pherry service
+install | uninstall | status | start | restart`, and `pherry dock` offers it once interactively
+(remembered in `config.json`; `--service` / `--no-service` to force). Restart policy is
+restart-on-unsuccessful-exit paired with the bin's new exit-code contract — `pherry serve`
+against a live daemon exits **0** (`AlreadyRunningError`) — so crashes resurrect, a deliberate
+`--stop` stays stopped, and the manager never thrashes against a hand-run daemon. Units bake the
+absolute node + entry script and a **login-shell `PATH`** capture (so agent detection — P3e —
+keeps working under the manager's bare env), and every re-dock refreshes them; a managed dock
+ensures/heals the daemon *through* the manager. Honest platform truths: macOS starts at login
+(not power-on); Linux needs `loginctl enable-linger` for pre-login start (install advises).
 
 **Next: P3d** voice worker (LiveKit room behind the ring channel) · **P4** cloud sandboxes.
 Continuing an in-flight phase? Read [`docs/HANDOFF.md`](./docs/HANDOFF.md) — state, seams, and the
