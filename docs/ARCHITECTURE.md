@@ -1,8 +1,7 @@
 # Pherry — Architecture
 
-The canonical design of Pherry v2. For working conventions and status see [`../AGENTS.md`](../AGENTS.md);
-for the current leg spec see [`leg-3c.md`](./leg-3c.md). A visual version of this document lives at
-(private link removed)
+The canonical design of Pherry. For working conventions see [`../AGENTS.md`](../AGENTS.md); for the
+one-page map with diagrams see [`architecture-diagram.md`](./architecture-diagram.md).
 
 Pherry lets you steer coding agents from your phone. `board` a repo, then just type `gemini` (or
 `claude`/`codex`/…) and its TUI opens in your terminal **and** mirrors to your phone, byte-for-byte,
@@ -123,8 +122,8 @@ Clerk and the E2EE channel are **complementary**: the channel authenticates the 
 controller may only reach a host in its own org). Because of §4, the relay authorizes the *pairing*
 without ever seeing the *content*.
 
-**Open-core boundary.** Clerk is a dependency of the **proprietary control plane only**. The open
-protocol carries an **opaque bearer token**, never "a Clerk JWT" — so the open `host`/`cli`/`sdk` do not
+**The boundary.** Clerk is a dependency of the **control plane only**. The
+protocol carries an **opaque bearer token**, never "a Clerk JWT" — so `host`/`cli`/`sdk` do not
 depend on Clerk, and a self-hoster can back their own control plane with any identity provider. The
 hosted plane happens to validate that token via Clerk.
 
@@ -144,7 +143,7 @@ A host runs sessions; a session runs on a **`Backend`**. `spawn` / `write` / `re
 LocalPtyBackend    → node-pty on this machine        (open, self-host)
 ContainerBackend   → docker/podman                    (open)
 SshBackend         → a tiny relay deployed over SSH    (open)
-CloudSandboxBackend → provision a microVM, run there   (proprietary orchestrator)
+CloudSandboxBackend → provision a microVM, run there   (cloud orchestrator)
 ```
 
 Follow-custody, the raw mirror, tappable approvals, idle detection — all written **once** against
@@ -205,7 +204,7 @@ The end-user surface is **just `dock` + `board`, then type the agent's name**. U
 follow-custody is a `LocalPtyBackend` mode where a PATH shim intercepts a hand-launched TUI and hands its
 PTY to the host. From the wire's perspective it's an ordinary session, so it inherits the byte mirror,
 composer, approvals, and idle-ring with zero special-casing — Orca-grade mirroring on terminals the user
-launched themselves, which an "own-the-IDE" tool structurally can't do. (Spec: [`leg-3c.md`](./leg-3c.md).)
+launched themselves, which an "own-the-IDE" tool structurally can't do.
 
 ---
 
@@ -224,30 +223,30 @@ problem, not a trust problem.
 
 ---
 
-## 11. Monorepo & the open-core boundary
+## 11. Monorepo & the local/cloud boundary
 
-The open half is **the engine that runs on your machine** (self-hostable, terminal-runnable); the
-proprietary half is **the cloud** (hosted routing, the sandbox fleet, billing). The seam is the protocol,
-so the open host talks the same wire to our hosted control plane *or* a self-hosted one.
+The local half is **the engine that runs on your machine** (self-hostable, terminal-runnable); the
+cloud half is **the routing layer** (control plane, relay, dashboard). The seam is the protocol, so the
+host talks the same wire to any control plane — hosted *or* self-hosted.
 
 | Path | | |
 |---|---|---|
-| `protocol/` | the wire | **open** |
-| `packages/host/` | session runtime · backends · custody · serve | open |
-| `packages/channel/` | audited E2EE secure channel | open |
-| `packages/relay-core/` | the blind relay rendezvous: outer protocol · host proof · cell · relay transport adapters | open |
-| `packages/sdk/` | controller client | open |
-| `packages/transport-node/` | node-socket transport | open |
-| `packages/cli/` | the `pherry` CLI + `runTerminalClient` engine | open |
-| `apps/control-plane/` | router · auth · tenancy · attention | proprietary |
-| `apps/relay/` | the deployable blind cell: `relay-core` + the control-plane authorizer | proprietary |
-| `apps/sandbox-orchestrator/` | the cloud host fleet | proprietary |
-| `apps/voice-worker/` | the LiveKit voice channel (Python) | proprietary |
-| `apps/dashboard/` | web console | proprietary |
-| `ios/` | the iOS app — a controller + the native-ring channel | proprietary |
+| `protocol/` | the wire | **local** |
+| `packages/host/` | session runtime · backends · custody · serve | local |
+| `packages/channel/` | audited E2EE secure channel | local |
+| `packages/relay-core/` | the blind relay rendezvous: outer protocol · host proof · cell · relay transport adapters | local |
+| `packages/sdk/` | controller client | local |
+| `packages/transport-node/` | node-socket transport | local |
+| `packages/cli/` | the `pherry` CLI + `runTerminalClient` engine | local |
+| `apps/control-plane/` | router · auth · tenancy · attention | cloud |
+| `apps/relay/` | the deployable blind cell: `relay-core` + the control-plane authorizer | cloud |
+| `apps/sandbox-orchestrator/` | the cloud host fleet | cloud |
+| `apps/voice-worker/` | the LiveKit voice channel (Python) | cloud |
+| `apps/dashboard/` | web console | cloud |
+| `ios/` | the iOS app — a controller + the native-ring channel | phone |
 
-**Rule:** open packages have *no import edge into `apps/`*. `apps/` may depend on the open packages. This
-boundary is what keeps the open-source cut clean.
+**Rule:** `protocol/` and `packages/*` have *no import edge into `apps/`*; `apps/` may depend on them. This
+boundary is what keeps the engine reusable and the cloud swappable.
 
 ---
 
@@ -260,26 +259,26 @@ phase with a blank "build it all" agent; start with the spine and go leg by leg,
 `@pherry/protocol`: schemas, capability registry, versioning, the typed `METHODS` registry, the binary PTY
 frame codec, JSON-Schema export. The OSS spec and the foundation everything hangs off.
 
-### ✅ P1 — a runnable, open, local-only tool — *done except leg 3c*
+### ✅ P1 — a runnable, local-only tool — *done*
 - ✅ `@pherry/host` — session runtime (host-owns-PTY, byte mirror via headless xterm, `Backend` +
   LocalPty/Fake, `CustodyDesk`, `serveConnection`, agent adapters).
 - ✅ `@pherry/channel` — the audited E2EE secure channel.
 - ✅ `@pherry/sdk` — the `Controller` client; end-to-end mirror path proven over the encrypted channel.
 - ✅ `@pherry/transport-node` + `@pherry/cli` — `pherry run` / `attach` (dev tooling) and the reusable
   `runTerminalClient` engine. **Live-smoke-tested: a real bash PTY mirrored over E2EE in two terminals.**
-- ⏭ **leg 3c (next) — the custody UX:** the persistent host daemon, `pherry board` + PATH shims +
-  `pherry open`, `anchor`/`unboard`. Makes the transparent "just type `gemini`" flow real **locally**
-  (a second `pherry attach` is the mirror viewer; the phone becomes that viewer at P2). Spec: [`leg-3c.md`](./leg-3c.md).
+- ✅ **the custody UX** — the persistent host daemon, `pherry board` + PATH shims + `pherry open`,
+  `anchor`/`unboard`: the transparent "just type `gemini`" flow, locally (a second `pherry attach` is
+  the mirror viewer; the phone is that viewer after P2).
 
 *At the end of P1 you can clone the repo and run a local, end-to-end-encrypted terminal mirror with no cloud.*
 
-### ⏭ P2 — relay + control plane + pairing → the phone
+### ✅ P2 — relay + control plane + pairing → the phone — *done*
 The blind director→cell **relay**, the stateless **control plane** (Clerk-backed human auth + host/device
 credentials + tenancy + registry, see §4a), and **`dock`** (Clerk login + QR phone pairing). After P2 a controller reaches a host **over the internet**,
 E2EE (provable with a remote CLI controller; the phone *app* is P3). New: `apps/control-plane`,
-`apps/relay`, `packages/relay-core`, and `dock`'s cloud half. Spec: [`leg-P2.md`](./leg-P2.md).
+`apps/relay`, `packages/relay-core`, and `dock`'s cloud half.
 
-### ⏭ P3 — iOS controller + the attention plane
+### ✅ P3 — iOS controller + the attention plane — *done except the voice worker*
 Reuse the proven native CallKit ring; add a SwiftTerm mirror view + tappable approvals. Wire the
 **attention plane** (`attention.raise` → channels) and the **Python voice worker** as the ring channel.
 After P3 you can ring + steer + mirror from the phone. New: `ios/`, `apps/voice-worker`, the attention

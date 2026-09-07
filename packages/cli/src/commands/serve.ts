@@ -413,7 +413,7 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
           // Capability split (steer-only over the relay): a relay-bridged
           // controller may subscribe/input/resize/unsubscribe and list sessions,
           // but NOT reserve/claim custody. Custody is arbitrary process spawn with
-          // caller-chosen argv/cwd/env; per docs/leg-3c.md it is host-facing and
+          // caller-chosen argv/cwd/env; by design it is host-facing and
           // "the shim/`open` is the only caller" — so it is served on the local
           // unix socket ONLY (above), never over the org-scoped relay ticket.
           // Remote spawn for cloud hosts is the separate `sandbox.spawn` method.

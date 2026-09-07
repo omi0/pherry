@@ -2,8 +2,8 @@
   "name": "@pherry/control-plane",
   "version": "0.1.0",
   "private": true,
-  "description": "The Pherry control plane — the stateless router: auth, tenancy, pairing, and relay-ticket coordination. Proprietary.",
-  "license": "UNLICENSED",
+  "description": "The Pherry control plane — the stateless router: auth, tenancy, pairing, and relay-ticket coordination.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",

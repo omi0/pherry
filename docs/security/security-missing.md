@@ -1,6 +1,6 @@
 # Security findings — verification status
 
-Read-only check of every item in [`securityfindings.md`](./securityfindings.md) against the current tree (hardening commits `22f03cb`, `c37b57d`, `faf5d6f`, `fb87378`, `736de64`/`50698bd`, `d62ef2f`, `b45e8f6`, plus intentional deferrals in [`docs/security-followups.md`](./docs/security-followups.md)).
+Read-only check of every item in [`securityfindings.md`](./securityfindings.md) against the current tree (the `fix(security):` hardening commits, plus intentional deferrals in [`security-followups.md`](./security-followups.md)).
 
 **Bottom line:** Most actionable Critical/High and Medium items from the hardening pass are **fixed in code**. Several items are **intentionally by design**, a few are **partial**, and a cluster of **Low** + **iOS** + **ops** items remain open. Not every issue in the audit is fixed.
 
@@ -11,7 +11,7 @@ Read-only check of every item in [`securityfindings.md`](./securityfindings.md) 
 | # | Status | Evidence |
 |---|--------|----------|
 | **H1** Remote custody RCE | **FIXED** | `packages/cli/src/commands/serve.ts`: local socket passes `{ custody, listSessions }`; relay path is steer-only — `serveConnection(..., { listSessions })` only (no `custody`). |
-| **H2** Host data-dial ticket burn | **FIXED (residual)** | `k_data` + per-`conn-open` `bridgeNonce` + `HMAC` on host `data-auth`; wrong/missing MAC → `data-auth-failed`, bridge left for real host. Residual: active on-path MITM can still replay in-flight MAC (denial only). Documented in `docs/security-followups.md`. |
+| **H2** Host data-dial ticket burn | **FIXED (residual)** | `k_data` + per-`conn-open` `bridgeNonce` + `HMAC` on host `data-auth`; wrong/missing MAC → `data-auth-failed`, bridge left for real host. Residual: active on-path MITM can still replay in-flight MAC (denial only). Documented in `security-followups.md`. |
 | **H3** Tickets consumed before bridge success | **NOT FIXED (by design)** | Still Redis `GETDEL` on resolve (`consumeTicket` / authorizer). Documented as intentional global one-time anti-replay; two-phase tickets would weaken that. |
 | **H4** No host revoke API | **FIXED** | `DELETE /v1/hosts/:id` in `user.ts`; dashboard Revoke in `Hosts.tsx`; tests in `routes-user.test.ts`. |
 | **H5** Rate limits collapse behind proxy | **FIXED** | `trustProxy` from `TRUST_PROXY` config wired into Fastify; tests in `server.test.ts` / `config.test.ts`; deploy docs. |
@@ -142,4 +142,4 @@ Those are **largely done**. The hardening commits and deferred-fix series cover 
 
 ## How this was verified
 
-Read-only inspection of the paths named in each finding, plus commit messages for the hardening / deferred-fix series. Tests were not re-run. Confidence is high for code presence/absence of the described mitigations; residual risk assessments for H2/H7 match `docs/security-followups.md`.
+Read-only inspection of the paths named in each finding, plus commit messages for the hardening / deferred-fix series. Tests were not re-run. Confidence is high for code presence/absence of the described mitigations; residual risk assessments for H2/H7 match `security-followups.md`.

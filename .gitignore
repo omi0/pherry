@@ -9,3 +9,8 @@ protocol/schema/
 .env
 .env.*
 !.env.example
+
+# Local working notes — not part of the published repo.
+docs/leg-*.md
+docs/HANDOFF.md
+docs/STATUS.md

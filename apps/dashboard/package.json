@@ -2,8 +2,8 @@
   "name": "@pherry/dashboard",
   "version": "0.1.0",
   "private": true,
-  "description": "The Pherry dashboard — the browser console: real sign-in, the attention inbox, hosts/sessions/devices. Proprietary.",
-  "license": "UNLICENSED",
+  "description": "The Pherry dashboard — the browser console: real sign-in, the attention inbox, hosts/sessions/devices.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

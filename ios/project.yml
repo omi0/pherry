@@ -19,7 +19,7 @@ settings:
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "6.0"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
-    DEVELOPMENT_TEAM: YOURTEAMID
+    # DEVELOPMENT_TEAM: YOURTEAMID   (device builds only — simulator builds are unsigned)
     CODE_SIGN_STYLE: Automatic
 
 packages:

@@ -6,8 +6,7 @@ and context-bound**, mirror it in a real terminal, and steer it. When an agent r
 `urgency: call`, the phone **rings** (PushKit → CallKit) and answering drops you straight into the
 session.
 
-This directory is **proprietary** (see [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) §11) and
-lives **outside** the pnpm workspace, so the JS verify gate is unaffected. It is a *second
+This directory lives **outside** the pnpm workspace, so the JS verify gate is unaffected. It is a *second
 implementation of the existing wire* — it adds no protocol.
 
 ## Layout
@@ -82,7 +81,7 @@ push/ring channels degrade to logging stubs; the in-app inbox is unaffected.
 ## PherryKit tests & the conformance vectors
 
 ```bash
-cd ios/PherryKit && swift test          # runs on this machine, no device — 50 tests
+cd ios/PherryKit && swift test          # runs on this machine, no device — 59 tests
 ```
 
 The Swift wire is proven byte-for-byte equivalent to the TypeScript reference by the committed JSON

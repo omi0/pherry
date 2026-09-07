@@ -4,7 +4,7 @@
  * A controller that may reach a host is issued a **one-time ticket** ({@link
  * issueTicket}); a cell later presents that ticket to be resolved to a route and
  * the host's pinned static key ({@link consumeTicket}). The normative requirement
- * from `docs/leg-P2b.md`:
+ * from the P2b design brief:
  *
  * > **Relay-ticket one-time-use is enforced GLOBALLY and ATOMICALLY in the
  * > authorizer.** A ticket resolved once at *any* cell is dead everywhere.

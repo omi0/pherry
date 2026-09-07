@@ -336,7 +336,7 @@ iOS `PherryKit` conformance vectors (outside this package) are an important cros
 
 ## 9. Bottom line
 
-For Pherry’s product threat model (blind relay, pinned host, E2EE terminal steering), `@pherry/channel` is **fit for purpose as an open-core primitive**, with honest documentation and solid tests.  
+For Pherry’s product threat model (blind relay, pinned host, E2EE terminal steering), `@pherry/channel` is **fit for purpose as a reusable primitive**, with honest documentation and solid tests.  
 
 It is **not** yet “externally audited production crypto.” The main risks are **misuse of provisional readiness (H1)**, **receive-buffer DoS amplification (M1)**, and the usual **custom-protocol residual (M3 / L5)** — not an identified AEAD/DH break.
 

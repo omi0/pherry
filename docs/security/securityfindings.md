@@ -2,7 +2,7 @@
 
 Read-only audit of the monorepo (docs + source). No live exploit testing.  
 **Context:** P3c complete; next is P3d (voice worker) then P4 (cloud sandboxes).  
-**Scope:** open packages (`protocol`, `channel`, `host`, `relay-core`, `sdk`, `transport-node`, `cli`), proprietary apps (`control-plane`, `relay`, `dashboard`), and `ios/`.
+**Scope:** open packages (`protocol`, `channel`, `host`, `relay-core`, `sdk`, `transport-node`, `cli`), the apps (`control-plane`, `relay`, `dashboard`), and `ios/`.
 
 ---
 
@@ -29,7 +29,7 @@ The core design is sound: **E2EE sessions**, **hash-at-rest credentials**, **pri
 7. **File hygiene** — `~/.pherry` `0700`; secrets, dock config, and `attention-hook.json` `0600` with re-`chmod`.
 8. **CORS opt-in** to exactly the dashboard origin.
 9. **Tests as gate** — auth matrix, e2e relay, attention e2e, Swift ↔ TS conformance vectors.
-10. **Open-core boundary** — open packages have no import edge into `apps/`.
+10. **Package/app boundary** — `protocol/` + `packages/*` have no import edge into `apps/`.
 
 ---
 
@@ -39,7 +39,7 @@ The core design is sound: **E2EE sessions**, **hash-at-rest credentials**, **pri
 
 **Severity:** Critical (impact) / High (likelihood if a ticket or device token is compromised)
 
-**Severity nuance (added after verification):** For a *solo* user reaching their *own* laptop, this is largely inside the existing trust boundary — a same-user controller can already drive the PTY via `session.input`. The genuine escalation is threefold: (a) `custody.reserve` spawns an **arbitrary** process with attacker-chosen `argv`/`cwd`/`env`, bypassing the agent's own approval gate — strictly more than steering a running agent; (b) routing is **org-scoped**, so the reachable set is any org member's device or any leaked `dt_`/`ct_`, not "the phone that paired with this host"; (c) it contradicts the documented design — `docs/leg-3c.md` scopes custody to the local shim ("the shim/`open` is the only caller") and a **separate** `sandbox.spawn` method is the intended remote-spawn path for cloud hosts. So: Critical/High under the multi-user-org and stolen-token threat models; "within trust boundary" for a solo user on their own machine.
+**Severity nuance (added after verification):** For a *solo* user reaching their *own* laptop, this is largely inside the existing trust boundary — a same-user controller can already drive the PTY via `session.input`. The genuine escalation is threefold: (a) `custody.reserve` spawns an **arbitrary** process with attacker-chosen `argv`/`cwd`/`env`, bypassing the agent's own approval gate — strictly more than steering a running agent; (b) routing is **org-scoped**, so the reachable set is any org member's device or any leaked `dt_`/`ct_`, not "the phone that paired with this host"; (c) it contradicts the documented design — the original custody design scopes custody to the local shim ("the shim/`open` is the only caller") and a **separate** `sandbox.spawn` method is the intended remote-spawn path for cloud hosts. So: Critical/High under the multi-user-org and stolen-token threat models; "within trust boundary" for a solo user on their own machine.
 
 **Location:**
 - `packages/cli/src/commands/serve.ts` — local unix **and** relay both pass `{ custody, listSessions }` into `serveConnection`
@@ -547,7 +547,7 @@ Local malware or another user on a shared box can spam rings/push, burn attentio
 
 ## L5 — Custom Noise-NK (not full Noise) — external audit still owed
 
-**Location:** `packages/channel` (README warning); `docs/HANDOFF.md`; `docs/ARCHITECTURE.md` §4
+**Location:** `packages/channel` (README warning); `docs/ARCHITECTURE.md` §4
 
 **Finding:** Two bare ephemerals + HKDF; MITM without pin fails at first record (correct fail-closed). Construction is conservative but **custom** and not externally reviewed.
 
@@ -674,7 +674,7 @@ Local malware or another user on a shared box can spam rings/push, burn attentio
 | `session.approve` / `sandbox.spawn` | Protocol exists; host returns `METHOD_NOT_FOUND` | Expected until later legs |
 | Long sessions, no rekey | Documented channel tradeoff | Fresh channel on reconnect; external audit |
 | Relay raw TCP metadata | hostId, tickets visible on path | Threat model: treat metadata as sensitive; optional outer TLS later |
-| ARCHITECTURE §12 status drift | Still says P1/P2 “next” in places | Refresh to match AGENTS/HANDOFF |
+| ARCHITECTURE §12 status drift | Still says P1/P2 “next” in places | Refresh to match AGENTS |
 
 ---
 
@@ -682,8 +682,8 @@ Local malware or another user on a shared box can spam rings/push, burn attentio
 
 | Item | Source | Priority | How to fix |
 |---|---|---|---|
-| **External audit of `@pherry/channel`** before real users / hosted relay | HANDOFF, ARCHITECTURE §4, channel README | High | Commission review; track findings to close |
-| **P3d open questions** (room lifecycle, worker auth principal, what worker may know, CI vs device) | HANDOFF | Medium | Write `docs/leg-P3d.md` first (house pattern) |
+| **External audit of `@pherry/channel`** before real users / hosted relay | ARCHITECTURE §4, channel README | High | Commission review; track findings to close |
+| **P3d open questions** (room lifecycle, worker auth principal, what worker may know, CI vs device) | ARCHITECTURE §8 | Medium | Write the P3d design first |
 | Deploy docs gaps | `deploying.md` | Medium | Document `trustProxy`, private internal API, ban `DEV_HUMAN_TOKEN` in prod |
 | Roadmap status drift | ARCHITECTURE §12 | Low | Align with AGENTS Status |
 
@@ -716,7 +716,7 @@ Local malware or another user on a shared box can spam rings/push, burn attentio
 
 # Method
 
-- Read `docs/` (ARCHITECTURE, HANDOFF, deploying) and `AGENTS.md` status.
+- Read `docs/` (ARCHITECTURE, deploying) and `AGENTS.md` status.
 - Manual review of auth, tickets, pairing, attention, channel, cell, serve, CLI, dashboard, iOS Keychain/pairing.
 - Cross-checked findings against source files listed above.
 - Severities reflect impact × realistic exploit conditions.

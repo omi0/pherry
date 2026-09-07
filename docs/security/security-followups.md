@@ -1,6 +1,6 @@
 # Security follow-ups — deferred fixes
 
-Companion to [`../securityfindings.md`](../securityfindings.md). That file is the audit;
+Companion to [`../securityfindings.md`](./securityfindings.md). That file is the audit;
 this file records the findings that were **verified as real but deliberately not fixed**
 in the hardening pass, why each was deferred, what it implies while it stays open, and the
 shape of the eventual fix. It also lists the findings that were verified as **by design**
@@ -10,8 +10,8 @@ The hardening pass itself (what *was* fixed) is in the git history — `fix(secu
 and every item there ships with tests; the full verify gate is green.
 
 > **Update (2026-07-23).** The four "deferred but actionable" items below have since been
-> implemented on branch `security/deferred-fixes` (commits `c37b57d` H7, `faf5d6f` H2,
-> `fb87378` M19, `736de64`+`50698bd` M22, `d62ef2f` review follow-ups). Each carries a
+> implemented on branch `security/deferred-fixes` (the `fix(security):` commits for H7, H2,
+> M19, M22, and the review follow-ups). Each carries a
 > **Status** line recording what actually landed — including H2's residual and the part of
 > H7 that stays operational. The full JS gate (`make verify`) and the iOS gate
 > (`swift test`, 41 tests) are green on that branch. Independent adversarial review found no
@@ -45,7 +45,7 @@ the gap cleanly. Do each as its own reviewed change.
   control-registration proof on the data leg, verified before splicing; fail closed on mismatch.
   Medium size — `relay-core` cell + host/controller adapters + tests, plus regenerated iOS vectors.
   Until done, keep it documented as an intentional availability risk under a path adversary.
-- **Status: FIXED (with a documented residual)** — commit `faf5d6f`. Registration now derives a
+- **Status: FIXED (with a documented residual)** — see the corresponding `fix(security):` commit. Registration now derives a
   data-leg key `k_data = HKDF(dh_proof, salt=nonce_reg, info=".../host-data-auth")` from the *same*
   DH the host proof already establishes (no extra round-trip, no new key material). Per `conn-open`
   the cell mints a fresh 32-byte `bridgeNonce`; the host answers its `data-auth` with
@@ -78,7 +78,7 @@ the gap cleanly. Do each as its own reviewed change.
 - **Fix shape.** Bounded buffer with close-on-exceed; pause fan-out when `write()` returns false and
   resume on `drain`; socket high-water marks; then a load test. Touches `transport-node`,
   `relay-core`, and the host mirror fan-out.
-- **Status: FIXED** — commit `fb87378`. Backpressure is added as **optional, feature-detected**
+- **Status: FIXED** — see the corresponding `fix(security):` commit. Backpressure is added as **optional, feature-detected**
   `Duplex` members (`writable` / `onDrain`, mirroring the existing `onPeerClose` detection), so no
   `Duplex` implementer breaks and the iOS `ByteTransport` needs no change. `node-socket.ts` tracks
   `write()`'s boolean and fires `onDrain` on the socket `'drain'`; `unix.ts` sets a 1 MiB socket
@@ -110,7 +110,7 @@ the gap cleanly. Do each as its own reviewed change.
   break today; it is a forward-compatibility gap.
 - **Fix shape.** Its own leg: `docs/leg-*.md` spec first, then protocol + host + sdk + iOS, with
   regenerated conformance vectors and an auth-matrix test that a disabled capability refuses closed.
-- **Status: FIXED** — see [`leg-M22.md`](./leg-M22.md). `Hello`/`HelloAck` are now the first control
+- **Status: FIXED** — see the M22 `fix(security):` commits. `Hello`/`HelloAck` are now the first control
   frames on every channel (host `serve-connection.ts`, sdk `controller.ts`, iOS `ControllerClient`);
   an incompatible `PROTOCOL_VERSION` fails closed on both ends (`VERSION_INCOMPATIBLE` + close), and
   each feature method gates on its negotiated capability — a de-negotiated capability is refused
@@ -131,8 +131,8 @@ the gap cleanly. Do each as its own reviewed change.
 - **What it implies while open.** If the internal key leaks or is weak *and* the routes are
   internet-reachable, an attacker can burn live tickets and read host public keys.
 - **Fix shape.** Separate internal listener (or platform private networking / mTLS) at deploy time.
-  Documented as a hard deploy rule in [`deploying.md`](./deploying.md); enforce in infra.
-- **Status: code half FIXED; infra half is now opt-in and documented** — commit `c37b57d`.
+  Documented as a hard deploy rule in [`deploying.md`](../deploying.md); enforce in infra.
+- **Status: code half FIXED; infra half is now opt-in and documented** — see the corresponding `fix(security):` commit.
   (a) The boot guard now **requires** `INTERNAL_API_KEY` in production — *undefined* or `< 32` chars
   both throw at boot (previously an unset key booted and the routes silently `503`'d). (b) The relay's
   `CONTROL_PLANE_URL` must be an absolute `http(s)` URL, and under `NODE_ENV=production` a non-https

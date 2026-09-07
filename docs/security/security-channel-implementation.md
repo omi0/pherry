@@ -2,8 +2,8 @@
 
 The **how** for the target design in
 [`security-channel-architecture.md`](./security-channel-architecture.md) (the **why**). Read
-[`../AGENTS.md`](../AGENTS.md), then the architecture doc, then
-[`leg-M22.md`](./leg-M22.md) — S3 extends exactly the handshake leg M22 made load-bearing, and reuses
+[`../AGENTS.md`](../../AGENTS.md), then the architecture doc, then
+the M22 hardening — S3 extends exactly the handshake leg M22 made load-bearing, and reuses
 its shape and vocabulary.
 
 **Do one leg, then stop and report.** Each S-leg is its own `docs:`-then-`feat:`/`fix:` commit pair and
@@ -436,5 +436,5 @@ in the report and adjudicated, never silently absorbed.
 
 ### Commit plan
 Per leg: `docs:` (if the spec needs amending) → one `feat:`/`fix:` with the finding ids in the subject.
-Then update `AGENTS.md` Status, `docs/HANDOFF.md` test counts, and the S-row in
+Then update `AGENTS.md` Status and the S-row in
 [`security-channel-architecture.md`](./security-channel-architecture.md) §4.

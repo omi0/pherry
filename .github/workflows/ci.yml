@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  js:
+    name: JS workspace — build · typecheck · test · lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm version comes from the `packageManager` pin in package.json.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Build first: workspace packages resolve each other through dist/, so a fresh
+      # checkout has nothing for typecheck/test to import until the dists exist.
+      - run: pnpm -r build
+      - run: pnpm -r typecheck
+      - run: pnpm -r test
+      - run: pnpm check
+
+  swift:
+    name: PherryKit — the wire in Swift
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift --version
+      - run: swift test
+        working-directory: ios/PherryKit

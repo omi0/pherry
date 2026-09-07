@@ -2,8 +2,8 @@
   "name": "@pherry/relay",
   "version": "0.1.0",
   "private": true,
-  "description": "The Pherry relay — a thin deployable that runs @pherry/relay-core's blind cell with the control-plane HTTP authorizer. Proprietary.",
-  "license": "UNLICENSED",
+  "description": "The Pherry relay — a thin deployable that runs @pherry/relay-core's blind cell with the control-plane HTTP authorizer.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",

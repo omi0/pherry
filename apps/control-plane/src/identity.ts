@@ -1,6 +1,6 @@
 /**
  * The identity seam — human authentication behind an injected interface so the
- * open-core boundary holds. The wire carries an **opaque bearer token**, never
+ * package/app boundary holds. The wire carries an **opaque bearer token**, never
  * "a Clerk JWT": Clerk lives only in `adapters/clerk.ts` (via `jose` + fetch, no
  * SDK), and a self-hoster swaps in any {@link IdentityProvider}. Tests inject
  * {@link FakeIdentityProvider}; Clerk is never hit in tests.

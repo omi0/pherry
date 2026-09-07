@@ -15,8 +15,8 @@ One versioned, capability-negotiated protocol — **the wire**. Exactly two role
 
 The control plane is a **router**, not a brain: it authenticates + pairs the two ends and
 relays **end-to-end-encrypted** frames between them. It never reads a session's content.
-Full design + roadmap: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) (visual version:
-(private link removed)).
+Full design + roadmap: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md); the one-page map with
+diagrams: [`docs/architecture-diagram.md`](./docs/architecture-diagram.md).
 
 ## Invariants — never violate these
 
@@ -34,29 +34,30 @@ Full design + roadmap: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) (visual 
 
 ## CLI vocabulary (nautical; ONLY these three are renamed — the rest stay plain)
 
-- `pherry dock` — onboard: login + QR phone pairing + config (the home port). *Needs the P2 cloud.*
+- `pherry dock` — onboard: login + QR phone pairing + config (the home port). *Needs a control plane.*
 - `pherry board <repo>` — start custody (install shims; agents *board* the ferry).
 - `pherry anchor` — the **soft brake**: stop custodying *new* launches (they run free) while
   existing sessions here stay visible/steerable; revert by `board`-ing again.
 - `pherry unboard` — hard revert: remove the shims/custody entirely.
 - `pherry run` / `attach` / `serve` — **development & testing tooling only**, not the user surface.
 
-## Monorepo (open core)
+## Monorepo
 
 | Path | What | |
 |---|---|---|
-| `protocol/` | the wire: zod schemas → types, capabilities, RPC envelope, `METHODS`, PTY frame codec | **open** |
-| `packages/host/` | session runtime · `Backend` (+ LocalPty/Fake) · `Mirror` (headless xterm) · `CustodyDesk` · `serveConnection` | open |
-| `packages/channel/` | the **audited** E2EE secure channel (`@noble`) | open |
-| `packages/relay-core/` | the blind relay rendezvous: outer protocol · host proof · cell · relay transport adapters | open |
-| `packages/sdk/` | the `Controller` client | open |
-| `packages/transport-node/` | node-socket `Duplex` + unix listen/connect | open |
-| `packages/cli/` | the `pherry` CLI + the reusable **`runTerminalClient`** engine | open |
-| `apps/control-plane/` | the router: auth · tenancy · pairing · relay coordination — Fastify + Drizzle/Postgres + Redis | proprietary |
-| `apps/relay/` | the deployable blind cell: `relay-core` + the control-plane authorizer | proprietary |
-| `ios/` | the iOS controller app + `PherryKit` (the wire in Swift) — **outside the pnpm workspace** | proprietary |
+| `protocol/` | the wire: zod schemas → types, capabilities, RPC envelope, `METHODS`, PTY frame codec | **local** |
+| `packages/host/` | session runtime · `Backend` (+ LocalPty/Fake) · `Mirror` (headless xterm) · `CustodyDesk` · `serveConnection` | local |
+| `packages/channel/` | the **audited** E2EE secure channel (`@noble`) | local |
+| `packages/relay-core/` | the blind relay rendezvous: outer protocol · host proof · cell · relay transport adapters | local |
+| `packages/sdk/` | the `Controller` client | local |
+| `packages/transport-node/` | node-socket `Duplex` + unix listen/connect | local |
+| `packages/cli/` | the `pherry` CLI + the reusable **`runTerminalClient`** engine | local |
+| `apps/control-plane/` | the router: auth · tenancy · pairing · relay coordination — Fastify + Drizzle/Postgres + Redis | cloud |
+| `apps/relay/` | the deployable blind cell: `relay-core` + the control-plane authorizer | cloud |
+| `apps/dashboard/` | the web console: sign-in, the dock approval page, hosts · sessions · devices, the attention inbox, the audit log — Vite + React | browser |
+| `ios/` | the iOS controller app + `PherryKit` (the wire in Swift) — **outside the pnpm workspace** | phone |
 
-Open packages must have **no import edge into `apps/`**. `apps/` may depend on the open packages.
+`protocol/` and `packages/*` must have **no import edge into `apps/`**; `apps/` may depend on them.
 `ios/` is Swift with its own gate (`swift test` in `ios/PherryKit`, `xcodegen generate` + an unsigned
 simulator build; see `ios/README.md`); biome ignores it (`biome.json` `files.ignore` — biome 1.9
 does not honor nested `.gitignore`s), and the JS verify gate is untouched by it.
@@ -78,119 +79,15 @@ does not honor nested `.gitignore`s), and the JS verify gate is untouched by it.
 
 - Small, verifiable legs. **Tests are the gate.** Review the diff. Match the house style of the
   existing packages (doc-comment exported symbols; exhaustive vitest).
-- **Never touch `/Users/dev/Desktop/PriorProject`** — that is the v1 codebase, kept only as reference.
-- Commit + push per reviewed-green leg. Remote: `git@github.com:omi0/pherry.git` (branch `main`).
+- Commit per reviewed-green leg.
 
-## Status (as of the last commit)
+## Status
 
-**Done, green** — 10 workspace projects, 1121 tests: `protocol` (140) · `host` (106) · `channel`
-(80, audited) · `relay-core` (60) · `sdk` (15) · `transport-node` (11) · `cli` (261) · `control-plane`
-(358) · `relay` (31) · `dashboard` (59); plus, outside the workspace, `ios/` — `PherryKit` (59 Swift
-tests, conformance-vector-proven against the TS wire) and the app's unit bundle (94). Leg 3c gave the full local, E2EE, multi-viewer custody flow: `pherry board` a
-repo, then typing `gemini` (or `claude`/`codex`/…) is intercepted by a PATH shim → the persistent
-`pherry serve` daemon takes custody → the agent's TUI opens in your terminal while a second viewer
-(`pherry attach`) mirrors the same host-owned session.
+Implemented and green: the wire, the secure channel, the host runtime and local multi-viewer custody;
+the blind relay, the control plane, and `dock` onboarding; the attention plane (in-app, push, ring);
+the dashboard and the iOS controller; device identity, the enrollment ceremony, mutual authentication
+in the channel, presence gating, and the host + control-plane audit logs; the sessions-first phone UX
+with constrained remote launch; boot persistence via launchd / systemd user units.
 
-**Leg P2a is done:** `@pherry/relay-core` is the open, blind director→cell rendezvous — the outer
-coordination protocol, a DH host proof (possession of the channel static key), the injected
-authorizer seam, a reference cell, and host/controller transport adapters that each expose a
-`@pherry/channel` `Duplex`, so `serveConnection` / `Controller` run **unchanged** over a
-relay-bridged connection with routing identifiers bound into the channel context (a mis-splice fails
-closed).
-
-**Leg P2b is done:** the control plane authenticates humans/hosts/devices, pairs phones, and issues
-the one-time relay tickets the blind cells consume. `apps/control-plane` is the stateless router
-(Fastify + Drizzle/Postgres + Redis, with Clerk behind an injected `IdentityProvider`); `apps/relay`
-is the thin deployable that runs `relay-core`'s blind cell with its `authorizer` wired to the control
-plane's internal HTTP API (which resolves + atomically consumes a ticket via Redis `GETDEL`, so a
-ticket is one-time **globally**, across every cell). An in-process integration test proves the full
-API→relay flow — a paired device gets a ticket, reaches its host through the cell, and runs a live
-E2EE session — plus global one-time-use across two cells and impostor-host rejection.
-
-**Leg P2c is done — P2 is complete:** the local tool is online. `pherry dock` is the guided v1-style
-onboarding — one browser visit to sign in (a loopback-callback CLI-auth flow on the control plane, with
-a headless device-code fallback and a `--token` escape hatch; the exchange mints a short-lived `ct_`
-human token), host registration (the `hk_` credential + `host_id` + URLs stored `0600` in
-`~/.pherry/dock.json`), daemon ensure, and a terminal-rendered `pherry://pair` QR. A docked daemon
-**dials the relay outbound** (`registerHostWithCell` + reconnect/backoff + control-plane heartbeats)
-and serves the *same* `SessionRegistry` over both front doors — `serveConnection` reused verbatim,
-each bridged connection a responder channel with `context = relayChannelContext(hostId, ticket)`.
-`pherry attach --host <id>` is the remote controller: ticket from the control plane, dial the blind
-cell, initiator channel pinned to the API-returned host key — same `runTerminalClient` rendering as
-local. The P2-complete proof (`apps/relay/test/cli-e2e.test.ts`) drives dock → dial-out → pair-redeem
-→ remote attach through the real CLI paths over a real HTTP control plane and a real TCP cell.
-
-**Leg P3a is done — the attention plane.** A host raises the existing `AttentionEvent` atom (verbatim;
-protocol untouched) out-of-band: `POST /v1/attention` (`hk_`-authed) **suppresses** (Redis `NX`
-debounce per host/session/kind) · **quotas** (per-host + per-org, 429) · **routes** (`call` →
-ring+push+in-app, `notify` → push+in-app, `digest` → in-app) and persists to `attention_events`
-(migration `0001`), fanning out through a pluggable channel registry — in-app real (persistence is the
-pending queue), push + ring registered logging stubs for P3c/P3d. Controllers retrieve org-scoped:
-`GET /v1/attention` (device/human, `since` cursor + bounded long-poll) and one-time
-`POST /v1/attention/:id/ack`. Client side: `ControlPlaneClient.{raiseAttention,listAttention,
-ackAttention}`, the `pherry attention raise|list|watch|ack` verb (raise heartbeats the session first,
-so the binding never races), and a docked daemon's loopback hook intake (`127.0.0.1` ephemeral port in
-`~/.pherry/attention-hook.json`, `0600`) — the curl target for agent stop/notification hooks. Proven
-end-to-end in `apps/relay/test/attention-e2e.test.ts` (real CLI raise → real CLI retrieve/ack, no
-relay needed).
-
-**Leg P3b is done — the dashboard.** `apps/dashboard` (proprietary; Vite + React SPA) is the browser
-half of the product: the **real sign-in + one-click approve page** completing `pherry dock`'s browser
-visit (the control plane 302s `GET /cli/auth/:id` there when `DASHBOARD_URL` is set, with CORS scoped
-to exactly that origin), the **attention inbox** (poll + urgency badges + one-time ack), and the
-console (hosts + liveness + pair-QR modal, session metadata, device revoke). Auth is a seam: Clerk
-(`VITE_CLERK_PUBLISHABLE_KEY`, lazily loaded) or a **dev-token** paste mode backed by the
-control plane's opt-in `DEV_HUMAN_TOKEN` `DevIdentityProvider` (dev/self-host only; refuses to boot
-alongside Clerk; `db:seed-dev` seeds its org/user) — so the whole loop runs locally with no IdP
-account. New control-plane surface: `GET /v1/me`. See `docs/running-locally.md` §5.
-
-**Leg P3c is done — the phone is real.** `ios/` (proprietary, outside the pnpm workspace) is the
-native controller: scan `dock`'s QR (now carrying `&api=`) → redeem → `dt_` in the Keychain; reach a
-session exactly as `pherry attach --host` does (ticket → blind cell → initiator channel pinned +
-context-bound → `ControllerClient`) and steer it in a SwiftTerm terminal view. `PherryKit` is the
-whole wire re-implemented in Swift — Noise-NK handshake, HKDF schedule, XChaCha20-Poly1305 records
-(hand-rolled HChaCha20; CryptoKit has none), relay outer protocol, PTY codec — proven byte-equivalent
-by committed conformance vectors regenerated from the TS dists (`ios/scripts/generate-vectors.mjs`).
-The attention plane's **push** and **ring** stubs are now real channels behind an injected
-`PushSender` seam (mirroring `IdentityProvider`): APNs token-auth via `jose` + `node:http2`
-(`adapters/apns.ts`), alert pushes with kind-mapped titles, VoIP pushes (`apns-expiration: 0`) that
-the app must report to CallKit synchronously — the v1 **ring finale**: raise `--urgency call` → the
-phone rings full-screen → answer opens the session. Devices register tokens via
-`POST /v1/device/push-tokens` (`dt_` only; migration `0002` adds `voip_push_token`); a dead token
-(APNs `410`/`BadDeviceToken`) self-heals by clearing exactly that column. Blank APNs config degrades
-to the P3a logging stubs; no test ever hits APNs (`FakePushSender`). Real-device ringing needs Apple
-credentials + a physical iPhone (see `ios/README.md` + `docs/deploying.md` APNs). **Proven live**
-(2026-07-22, iPhone 13 / iOS 18.7, APNs sandbox): QR pair → both tokens registered → raise
-`--urgency call` → full-screen CallKit ring → answer opened the session and one-time-acked the event.
-
-**Leg P3e is done — sessions-first phone UX + constrained remote launch** (spec:
-[`docs/leg-P3e.md`](./docs/leg-P3e.md)). The app's first tab is **Sessions**: one aggregated list
-across every paired host (pill filters `All · <host> · +`, host online/offline from a now
-device-readable `GET /v1/hosts`, 90 s liveness window), and a floating `+` opens **New session** —
-host → project → agent + model → prompt → Start agent. The wire grew two additive methods
-(`launch.options` / `launch.start`, capability `launch.v1`, no version bump): the phone sends
-**ids only**; the host joins them against allowlists it alone composes (`~/.pherry/boarded.list` ×
-PATH-detected `AGENT_ADAPTERS`, now five with `kimi`), builds the argv itself
-(`buildLaunchArgv` — model flag + prompt per the adapter's `promptArg` template: positional,
-interactive flag, or refused for a CLI with none, advertised as `promptSupported: false`), and spawns through the same
-`CustodyDesk` path as a shim launch. H1 stands: `custody.*` (caller argv/cwd/env) never leaves the
-unix socket; launch rides the S3 enrolled-device gate, refuses unknown ids undifferentiated
-(`LaunchRefusedError`), and lands a `launch` audit line with the device identity. Exit proof:
-`packages/cli/test/serve-relay.test.ts`.
-
-**Leg P3f is done — boot persistence** (spec: [`docs/leg-P3f.md`](./docs/leg-P3f.md)). The daemon
-installs as an OS-managed service — a launchd LaunchAgent on macOS, a systemd **user** unit on
-Linux, never root (the trust model is the user's own files) — via `pherry service
-install | uninstall | status | start | restart`, and `pherry dock` offers it once interactively
-(remembered in `config.json`; `--service` / `--no-service` to force). Restart policy is
-restart-on-unsuccessful-exit paired with the bin's new exit-code contract — `pherry serve`
-against a live daemon exits **0** (`AlreadyRunningError`) — so crashes resurrect, a deliberate
-`--stop` stays stopped, and the manager never thrashes against a hand-run daemon. Units bake the
-absolute node + entry script and a **login-shell `PATH`** capture (so agent detection — P3e —
-keeps working under the manager's bare env), and every re-dock refreshes them; a managed dock
-ensures/heals the daemon *through* the manager. Honest platform truths: macOS starts at login
-(not power-on); Linux needs `loginctl enable-linger` for pre-login start (install advises).
-
-**Next: P3d** voice worker (LiveKit room behind the ring channel) · **P4** cloud sandboxes.
-Continuing an in-flight phase? Read [`docs/HANDOFF.md`](./docs/HANDOFF.md) — state, seams, and the
-working pattern, condensed for the next agent.
+Not yet: standalone binary distribution (npm / brew / curl), the voice worker (a LiveKit room behind
+the ring channel), cloud sandboxes, and the external audit of `@pherry/channel`.

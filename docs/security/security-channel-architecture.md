@@ -5,8 +5,8 @@ whole trust graph it sits in — where the pin comes from, who may steer a host,
 control plane can each do, and how iOS/CLI/dashboard differ. It settles the **NK vs KK** question and
 specifies the target design to build before a hosted relay carries real users.
 
-Companion documents: [`channel-audit.md`](../channel-audit.md) (code-level review of the package — its
-findings stand and are not repeated here), [`securityfindings.md`](../securityfindings.md),
+Companion documents: [`channel-audit.md`](./channel-audit.md) (code-level review of the package — its
+findings stand and are not repeated here), [`securityfindings.md`](./securityfindings.md),
 [`security-followups.md`](./security-followups.md).
 
 ---
@@ -51,7 +51,7 @@ attacker-held public key in a ticket response and the controller establishes a p
 channel *to the attacker*, who proxies to the real host. Every property the channel advertises — content
 confidentiality, host authenticity, `authenticated()` — holds, against the wrong peer. The relay is
 blind; the control plane never needed to be. This is a **confidentiality break** under the very threat
-model `leg-P2.md` declares ("the relay and the control plane are in the threat model and must be assumed
+model the P2 design declares ("the relay and the control plane are in the threat model and must be assumed
 hostile to content").
 
 This is not a bug in `packages/channel`. It is the trust anchor being wired to the party the design
@@ -277,4 +277,4 @@ The attention plane is a **deliberate hole in the E2EE boundary**: `summary`, `h
 ride APNs/VoIP payloads in cleartext to Apple, and will ride LiveKit to the worker. That is accepted (the
 ring must render before any fetch), but it is host-*authored* metadata, never session content, and P3d
 must not widen it — the worker speaks the summary, never the terminal. Worth stating explicitly in
-`leg-P3d.md` so the boundary is a written rule before the first line of worker code.
+the P3d design so the boundary is a written rule before the first line of worker code.
